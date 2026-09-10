@@ -12,7 +12,6 @@
 cd ~/Downloads
 git clone --branch v1.1 --depth 1 https://github.com/7901971-cloud/node-suite.git node-suite-1.1
 cd node-suite-1.1
-shasum -a 256 -c SHA256SUMS.txt
 bash -n cloudflare/deploy-complete.sh
 bash cloudflare/deploy-complete.sh
 ```

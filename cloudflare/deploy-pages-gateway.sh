@@ -89,12 +89,20 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 if [ "$PROJECT_EXISTS" = "yes" ]; then
   say "检测到同名 Pages 项目，将复用并更新它的部署。"
 else
+  set +e
   CREATE_OUTPUT="$("$WRANGLER" pages project create "$PAGES_NAME" \
-    --production-branch main 2>&1)" || {
-      say "$CREATE_OUTPUT" >&2
-      die "创建 Pages 项目失败；如果名称已被占用，请换一个名称重试"
-    }
-  say "$CREATE_OUTPUT"
+    --production-branch main 2>&1)"
+  CREATE_RC=$?
+  set -e
+
+  if [ "$CREATE_RC" -eq 0 ]; then
+    say "$CREATE_OUTPUT"
+  elif printf '%s' "$CREATE_OUTPUT" | grep -Eqi 'already exists|code:[[:space:]]*8000002'; then
+    say "检测到同名 Pages 项目已存在，将直接复用并更新它的部署。"
+  else
+    say "$CREATE_OUTPUT" >&2
+    die "创建 Pages 项目失败；不是可安全复用的同名项目错误"
+  fi
 fi
 
 say
