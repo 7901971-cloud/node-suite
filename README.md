@@ -1,18 +1,6 @@
 # Node Suite 1.1
 
-仓库：`https://github.com/7901971-cloud/node-suite`
-
 安装器会检测现有配置：存在本套件配置时复用设备身份、节点参数和数据库；不存在时执行全新安装。不会接管无关的 SSH 或代理配置。
-
-## 发布固定版本
-
-将本版本推送到 GitHub 后，在仓库目录执行一次：
-
-```bash
-git tag -a v1.1 -m "Node Suite 1.1"
-git push origin main
-git push origin v1.1
-```
 
 下面的安装命令固定使用 `v1.1`，不会随 `main` 分支变化。
 
