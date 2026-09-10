@@ -1,0 +1,15 @@
+{
+  "name": "node-center-cloudflare-tgbot",
+  "version": "3.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "deploy:pages": "bash deploy-pages-gateway.sh",
+    "dev": "wrangler dev",
+    "check": "node --check src/index.js && node --check 'pages-gateway/functions/[[path]].js'"
+  },
+  "devDependencies": {
+    "wrangler": "4.129.0"
+  }
+}

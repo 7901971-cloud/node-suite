@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "router-node-center",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "observability": {
+    "enabled": false
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "router-node-center-db",
+      "database_id": "由部署脚本自动填写"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "REPORT_TIMEZONE": "Asia/Shanghai",
+    "DAILY_REPORT_HOUR": "9",
+    "OFFLINE_MINUTES": "15",
+    "ALERT_REMIND_HOURS": "6",
+    "ALERT_RETENTION_DAYS": "30"
+  }
+}
+

@@ -1,0 +1,12 @@
+.DS_Store
+__MACOSX/
+node_modules/
+.wrangler/
+.dev.vars*
+.env
+.env.*
+*.pem
+*.key
+wrangler.jsonc
+cloudflare/pages-gateway/wrangler.jsonc
+npm-debug.log*

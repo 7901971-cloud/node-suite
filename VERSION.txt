@@ -1,0 +1,4 @@
+Bundle / installers: 1.1
+Cloudflare API: 3.5.0
+Xray preferred: v26.7.28
+Wrangler: 4.129.0
