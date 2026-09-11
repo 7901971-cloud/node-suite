@@ -138,7 +138,7 @@ cat > wrangler.jsonc <<EOF
       "database_id": "$DB_ID"
     }
   ],
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "REPORT_TIMEZONE": "$REPORT_TIMEZONE",
     "DAILY_REPORT_HOUR": "$DAILY_HOUR",
@@ -153,7 +153,7 @@ say
 say "========== 初始化数据库 =========="
 npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql
 npx wrangler d1 execute "$DB_NAME" --remote \
-  --command="UPDATE bot_groups SET role='operator',updated_at=strftime('%s','now') WHERE access_mode='all' AND role='admin';" >/dev/null
+  --command="UPDATE bot_groups SET access_mode='members',role='viewer',updated_at=strftime('%s','now') WHERE access_mode='all' AND role<>'viewer';" >/dev/null
 
 WEBHOOK_SECRET="$(random_hex 24)"
 SECRET_LIST="$(npx wrangler secret list --json 2>/dev/null || printf '[]')"
@@ -197,14 +197,14 @@ HOOK_RESULT="$(curl -fsS --connect-timeout 10 --max-time 30 -X POST \
   "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
   --data-urlencode "url=${WORKER_URL}/telegram/webhook" \
   --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
-  --data-urlencode 'allowed_updates=["message","callback_query"]' \
+  --data-urlencode 'allowed_updates=["message","edited_message","callback_query","chat_member","my_chat_member"]' \
   --data 'drop_pending_updates=true')"
 printf '%s' "$HOOK_RESULT" | grep -q '"ok":true' || die "设置 Telegram Webhook 失败：$HOOK_RESULT"
 
 COMMAND_RESULT="$(curl -fsS --connect-timeout 10 --max-time 30 -X POST \
   "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -H 'Content-Type: application/json' \
-  --data '{"commands":[{"command":"start","description":"打开控制中心"},{"command":"routers","description":"进入节点中心"},{"command":"pages","description":"获取 Pages 监控地址"},{"command":"router","description":"路由器远控帮助"},{"command":"vps","description":"VPS远控帮助"},{"command":"id","description":"在群内显示本群 ID"},{"command":"menu","description":"返回主菜单"}]}' || true)"
+  --data '{"commands":[{"command":"start","description":"节点管理 / Bot 管理"},{"command":"routers","description":"节点管理"},{"command":"router","description":"路由器命令"},{"command":"vps","description":"VPS 命令"},{"command":"grouphelp","description":"管群命令"},{"command":"rules","description":"群规"},{"command":"id","description":"查看群和用户 ID"},{"command":"cancel","description":"取消当前输入"},{"command":"menu","description":"返回主菜单"}]}' || true)"
 
 HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${WORKER_URL}/health" || true)"
 if ! printf '%s' "$HEALTH" | grep -q '"ok":true'; then

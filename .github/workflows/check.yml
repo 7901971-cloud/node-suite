@@ -1,0 +1,21 @@
+name: Validate scripts and Bot permissions
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: JavaScript syntax and permissions regression
+        working-directory: cloudflare
+        run: |
+          npm run check
+          npm test
+      - name: Shell syntax
+        run: |
+          for script in cloudflare/*.sh vps/*.sh; do bash -n "$script"; done
+          for script in router/*.sh; do sh -n "$script"; done

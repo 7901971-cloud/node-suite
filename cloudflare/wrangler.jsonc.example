@@ -15,7 +15,7 @@
     }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["* * * * *"]
   },
   "vars": {
     "REPORT_TIMEZONE": "Asia/Shanghai",
@@ -25,4 +25,3 @@
     "ALERT_RETENTION_DAYS": "30"
   }
 }
-

@@ -76,8 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_device_commands_poll
 CREATE INDEX IF NOT EXISTS idx_device_commands_expiry
   ON device_commands(expires_at);
 
--- Bot 权限由此处长期维护。OWNER_TELEGRAM_IDS 始终是不可删除的最高管理员，
--- 其余用户/群均通过 Bot 设置菜单管理，无须再次修改 Worker 源码或 Secret。
+-- OWNER_TELEGRAM_IDS 仅在统一权限首次初始化时导入，之后所有管理员平级。
+-- 用户和管理员均由 Bot 菜单维护，删除/降权时必须保留至少一位管理员。
 CREATE TABLE IF NOT EXISTS bot_users (
   user_id TEXT PRIMARY KEY,
   role TEXT NOT NULL CHECK(role IN ('viewer','operator','admin')),
@@ -130,3 +130,48 @@ CREATE INDEX IF NOT EXISTS node_config_drafts_expiry ON node_config_drafts(expir
 
 CREATE INDEX IF NOT EXISTS idx_bot_pending_inputs_expiry
   ON bot_pending_inputs(expires_at);
+
+-- Group-wide access never grants device control. Roles are stored in bot_users.
+CREATE TABLE IF NOT EXISTS group_policy (
+  chat_id TEXT PRIMARY KEY,
+  config TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_rules (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  pattern TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL CHECK(action IN ('delete','mute','ban')),
+  UNIQUE(chat_id,kind,pattern)
+);
+CREATE TABLE IF NOT EXISTS group_challenges (
+  nonce TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  message_id INTEGER,
+  UNIQUE(chat_id,user_id)
+);
+CREATE INDEX IF NOT EXISTS group_challenges_expiry ON group_challenges(state,expires_at);
+CREATE TABLE IF NOT EXISTS group_rate (
+  chat_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  window INTEGER NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY(chat_id,user_id,window)
+);
+CREATE TABLE IF NOT EXISTS group_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS group_audit_chat ON group_audit(chat_id,id);
+CREATE TABLE IF NOT EXISTS group_events (id TEXT PRIMARY KEY,created_at INTEGER NOT NULL);

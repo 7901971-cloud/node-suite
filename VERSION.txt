@@ -1,6 +1,6 @@
-Bundle / docs: 1.1.2 hotfix
+Bundle / docs: 1.2
 Router installer base: 1.1
 VPS installer bootstrap: 1.1.2 (pinned base v1.1)
-Cloudflare API: 3.5.0
+Cloudflare API: 3.6.0
 Xray preferred: v26.7.28
 Wrangler: 4.129.0

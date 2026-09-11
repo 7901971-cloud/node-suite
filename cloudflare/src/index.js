@@ -1,6 +1,7 @@
 import { connect } from "cloudflare:sockets";
+import { groupUpdate, groupCallback, groupInput, groupMaintenance } from './groups.js';
 
-const VERSION = "3.5.0";
+const VERSION = "3.6.0";
 const PAIR_TTL_SECONDS = 10 * 60;
 const MAX_NODE_BYTES = 12 * 1024;
 const PAGE_SIZE = 8;
@@ -33,7 +34,9 @@ export default {
           env.DB.prepare("SELECT id,device_id,action,payload,status,expires_at,started_at,exit_code FROM device_commands LIMIT 1").first(),
           env.DB.prepare("SELECT id FROM node_config_drafts LIMIT 1").first(),
           env.DB.prepare("SELECT user_id,role FROM bot_users LIMIT 1").first(),
-          env.DB.prepare("SELECT chat_id,access_mode,role FROM bot_groups LIMIT 1").first()
+          env.DB.prepare("SELECT chat_id,access_mode,role FROM bot_groups LIMIT 1").first(),
+          env.DB.prepare("SELECT nonce FROM group_challenges LIMIT 1").first(),
+          env.DB.prepare("SELECT id FROM group_rules LIMIT 1").first()
         ]);
         return json({ ok: true, service: "router-node-center", version: VERSION,
           capabilities: { router_root: true, vps_root: true, command_check: true, router_vless: true, full_status_fixed: true, bot_permissions: true, copyable_node_cards: true, node_config: true, permanent_mute: true, realtime_refresh: true, pages_address: true, group_mention_only: true } });
@@ -197,10 +200,6 @@ function ownerIds(env) {
     .filter((x) => /^\d+$/.test(x));
 }
 
-function isOwner(id, env) {
-  return ownerIds(env).includes(String(id));
-}
-
 function botUsername(env) {
   return String(env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "").trim().toLowerCase();
 }
@@ -209,7 +208,7 @@ function groupMessageTargetsBot(message, env) {
   if (message?.chat?.type !== "group" && message?.chat?.type !== "supergroup") return true;
   const username = botUsername(env);
   if (!username) return false;
-  return String(message.text || "").toLowerCase().includes(`@${username}`);
+  return new RegExp(`@${username}(?![a-z0-9_])`, 'i').test(String(message.text || ''));
 }
 
 function normalizedMessageText(message, env) {
@@ -233,24 +232,53 @@ function can(access, required) {
 
 async function accessFor(env, userId, chat) {
   const uid = String(userId || "");
-  if (isOwner(uid, env)) return { role: "admin", rank: 3, source: "owner" };
   if (!chat?.id) return null;
+  const row = await env.DB.prepare("SELECT role FROM bot_users WHERE user_id=? AND enabled=1").bind(uid).first();
+  const role = normalRole(row?.role);
   if (chat.type === "private") {
-    const row = await env.DB.prepare("SELECT role FROM bot_users WHERE user_id=? AND enabled=1").bind(uid).first();
-    const role = normalRole(row?.role);
     return role ? { role, rank: ROLE_RANK[role], source: "user" } : null;
   }
   if (chat.type !== "group" && chat.type !== "supergroup") return null;
   const group = await env.DB.prepare("SELECT access_mode,role FROM bot_groups WHERE chat_id=? AND enabled=1").bind(String(chat.id)).first();
   if (!group) return null;
-  if (group.access_mode === "all") {
-    const role = normalRole(group.role);
-    const safeRole = role === "admin" ? "operator" : role;
-    return safeRole ? { role: safeRole, rank: ROLE_RANK[safeRole], source: "group_all" } : null;
-  }
-  const member = await env.DB.prepare("SELECT role FROM bot_group_members WHERE chat_id=? AND user_id=?").bind(String(chat.id), uid).first();
-  const role = normalRole(member?.role);
-  return role ? { role, rank: ROLE_RANK[role], source: "group_member" } : null;
+  if (role) return { role, rank: ROLE_RANK[role], source: "user" };
+  return group.access_mode === 'all' && group.role === 'viewer'
+    ? { role: 'viewer', rank: 1, source: 'group_all' } : null;
+}
+
+async function initializeAdmins(env) {
+  const key = 'unified_roles_v1';
+  if (await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(key).first()) return;
+  const now = nowSeconds();
+  const statements = ownerIds(env).map(id => env.DB.prepare(`INSERT INTO bot_users
+    (user_id,role,added_by,created_at,updated_at,enabled)
+    SELECT ?,'admin','bootstrap',?,?,1 WHERE NOT EXISTS(SELECT 1 FROM settings WHERE key=?)
+    ON CONFLICT(user_id) DO UPDATE SET role='admin',enabled=1`).bind(id, now, now, key));
+  statements.push(env.DB.prepare(`INSERT OR IGNORE INTO bot_users(user_id,role,added_by,created_at,updated_at,enabled)
+    SELECT m.user_id, CASE MAX(CASE m.role WHEN 'admin' THEN 3 WHEN 'operator' THEN 2 ELSE 1 END)
+      WHEN 3 THEN 'admin' WHEN 2 THEN 'operator' ELSE 'viewer' END, 'legacy',?,?,1
+    FROM bot_group_members m JOIN bot_groups g ON g.chat_id=m.chat_id AND g.enabled=1
+    WHERE NOT EXISTS(SELECT 1 FROM settings WHERE key=?) GROUP BY m.user_id`).bind(now, now, key));
+  statements.push(env.DB.prepare(`UPDATE bot_groups SET access_mode='members',role='viewer'
+    WHERE role<>'viewer' AND NOT EXISTS(SELECT 1 FROM settings WHERE key=?)`).bind(key));
+  statements.push(env.DB.prepare('INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)').bind(key, '1', now));
+  await env.DB.batch(statements);
+}
+
+async function administratorIds(env) {
+  await initializeAdmins(env);
+  return ((await env.DB.prepare("SELECT user_id FROM bot_users WHERE role='admin' AND enabled=1").all()).results || []).map(r => r.user_id);
+}
+
+const groupServices = { tg, editMenu, escapeHtml, nowSeconds, randomHex, can, accessFor,
+  normalize: normalizedMessageText, targetsBot: groupMessageTargetsBot, savePendingInput };
+
+function commandRole(action) { return ['status', 'refresh'].includes(action) ? 'viewer' : 'operator'; }
+
+async function requesterAccess(env, value) {
+  let user = String(value || ''), chat = user;
+  try { const p = JSON.parse(user); user = String(p.user || ''); chat = String(p.chat || user); } catch (_) {}
+  return accessFor(env, user, {id: chat, type: chat.startsWith('-') ? 'supergroup' : 'private'});
 }
 
 function roleLabel(role) {
@@ -264,6 +292,7 @@ function requireRole(access, role) {
 async function tg(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
+    signal: AbortSignal.timeout(12000),
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
   });
@@ -274,7 +303,7 @@ async function tg(env, method, payload) {
 
 async function notifyOwners(env, text, replyMarkup) {
   let sent = 0;
-  for (const chatId of ownerIds(env)) {
+  for (const chatId of await administratorIds(env)) {
     try {
       await tg(env, "sendMessage", {
         chat_id: chatId,
@@ -394,9 +423,10 @@ async function enrollRouter(request, env) {
   const codeHash = await sha256Hex(pairCode);
   const now = nowSeconds();
   const pair = await env.DB.prepare(
-    "SELECT code_hash FROM pair_codes WHERE code_hash=? AND used_at IS NULL AND expires_at>=?"
+    "SELECT code_hash,created_by FROM pair_codes WHERE code_hash=? AND used_at IS NULL AND expires_at>=?"
   ).bind(codeHash, now).first();
   if (!pair) return json({ ok: false, error: "invalid_or_expired_pair_code" }, 403);
+  if (!can(await accessFor(env,pair.created_by,{id:pair.created_by,type:'private'}),'operator')) return json({ok:false,error:'pair_authorization_revoked'},403);
 
   const deviceId = randomHex(8);
   const token = randomToken(32);
@@ -537,11 +567,15 @@ async function pollDeviceCommand(request, env) {
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const command = await env.DB.prepare(
-      `SELECT id,action,payload,expires_at FROM device_commands
+      `SELECT id,action,payload,expires_at,requested_by FROM device_commands
        WHERE device_id=? AND status='queued' AND expires_at>=?
        ORDER BY created_at LIMIT 1`
     ).bind(device.id, now).first();
     if (!command) return json({ ok: true, command: null, server_time: now });
+    if (!can(await requesterAccess(env, command.requested_by), commandRole(command.action))) {
+      await env.DB.prepare("UPDATE device_commands SET status='cancelled',payload='' WHERE id=? AND status='queued'").bind(command.id).run();
+      continue;
+    }
     const claimed = await env.DB.prepare(
       "UPDATE device_commands SET status='running',started_at=? WHERE id=? AND device_id=? AND status='queued'"
     ).bind(now, command.id, device.id).run();
@@ -602,7 +636,7 @@ async function receiveCommandResult(request, env) {
       `操作：<code>${escapeHtml(command.action)}</code>\n退出码：${exitCode}\n\n` +
       `<pre>${escapeHtml(clippedTelegram || "（没有输出）")}</pre>`,
     command.requested_by,
-    deviceButton(device.id)
+    deviceButton(device.id), commandRole(command.action)
   );
   if (!delivered) return json({ ok: false, error: "telegram_delivery_failed" }, 503);
   await env.DB.prepare(
@@ -611,9 +645,9 @@ async function receiveCommandResult(request, env) {
   return json({ ok: true });
 }
 
-async function notifyOwnersProtected(env, text, requester = '', keyboard = null) {
+async function notifyOwnersProtected(env, text, requester = '', keyboard = null, requiredRole = 'viewer') {
   let sent = false;
-  const recipients = new Set(ownerIds(env));
+  const recipients = new Set(await administratorIds(env));
   let requestedUser = String(requester || ""), requestedChat = requestedUser;
   try {
     const parsed = JSON.parse(requestedUser);
@@ -622,7 +656,7 @@ async function notifyOwnersProtected(env, text, requester = '', keyboard = null)
   } catch (_) {}
   if (requestedUser && requestedChat) {
     const requestedType = requestedChat.startsWith("-") ? "group" : "private";
-    if (await accessFor(env, requestedUser, { id: requestedChat, type: requestedType })) recipients.add(requestedChat);
+    if (can(await accessFor(env, requestedUser, { id: requestedChat, type: requestedType }), requiredRole)) recipients.add(requestedChat);
   }
   for (const chatId of recipients) {
     try {
@@ -695,8 +729,19 @@ async function telegramWebhook(request, env, ctx) {
     return json({ ok: false }, 403);
   }
   const update = await request.json();
+  await initializeAdmins(env);
+  if (Number.isSafeInteger(update.update_id)) {
+    const claimed = await env.DB.prepare('INSERT OR IGNORE INTO group_events(id,created_at) VALUES(?,?)').bind(`telegram:${update.update_id}`,nowSeconds()).run();
+    if (!claimed.meta.changes) return json({ok:true});
+  }
+  if (await groupUpdate(update, env, groupServices)) return json({ok: true});
+  if (update.callback_query && !update.callback_query.message?.chat) return json({ok: true});
   const actor = update.callback_query?.from || update.message?.from;
   const chat = update.callback_query?.message?.chat || update.message?.chat;
+  if (actor && update.message && chat?.type === 'private' && normalizedMessageText(update.message,env) === '/id') {
+    await tg(env,'sendMessage',{chat_id:chat.id,text:`你的 ID：<code>${actor.id}</code>`,parse_mode:'HTML'});
+    return json({ok:true});
+  }
   if (update.message && !groupMessageTargetsBot(update.message, env)) return json({ ok: true });
   const access = actor ? await accessFor(env, actor.id, chat) : null;
   if (access) access.chatType = chat?.type || "";
@@ -704,7 +749,7 @@ async function telegramWebhook(request, env, ctx) {
     if (update.callback_query?.id) {
       ctx.waitUntil(tg(env, "answerCallbackQuery", {
         callback_query_id: update.callback_query.id,
-        text: "没有操作权限；请让 Bot 管理员在私聊的「Bot 设置」中授权。",
+        text: "没有操作权限，请联系 Bot 管理员授权。",
         show_alert: true
       }).catch(() => {}));
     }
@@ -723,7 +768,8 @@ async function telegramWebhook(request, env, ctx) {
       // Acknowledge Telegram to avoid endlessly replaying an action after a render failure.
     }
   } else if (update.message) {
-    await handleMessage(update.message, env, access);
+    try { await handleMessage(update.message, env, access); }
+    catch (_) { await tg(env,'sendMessage',{chat_id:chat.id,text:'请求未完成，请重新打开菜单查看状态后重试。'}).catch(()=>{}); }
   }
   return json({ ok: true });
 }
@@ -731,11 +777,15 @@ async function telegramWebhook(request, env, ctx) {
 async function handleMessage(message, env, access) {
   const text = normalizedMessageText(message, env);
   const normalizedMessage = { ...message, text };
+  if (['/cancel','/start','/menu'].includes(text)) {
+    await env.DB.prepare('DELETE FROM bot_pending_inputs WHERE actor_id=?').bind(String(message.from.id)).run();
+    if (text === '/cancel') return tg(env,'sendMessage',{chat_id:message.chat.id,text:'已取消',reply_markup:rootKeyboard(access)});
+  }
   if ((message.chat.type === "group" || message.chat.type === "supergroup") && text === "/id" && can(access, "admin")) {
     await tg(env, "sendMessage", { chat_id: message.chat.id, text: `<b>本群 ID</b>\n<code>${message.chat.id}</code>\n\n在 Bot 私聊 → Bot 设置 → 群聊权限 中添加。`, parse_mode: "HTML" });
     return;
   }
-  if (can(access, "admin") && await consumePendingInput(normalizedMessage, env)) return;
+  if (can(access, "operator") && await consumePendingInput(normalizedMessage, env, access)) return;
   if (text === "/pages" || text === "/page") {
     await sendPagesAddress(env, message.chat.id);
     return;
@@ -749,7 +799,7 @@ async function handleMessage(message, env, access) {
     return;
   }
   if (text.startsWith("/vps ")) {
-    await handleVpsTextCommand(message, env, access);
+    await handleVpsTextCommand(normalizedMessage, env, access);
     return;
   }
   if (text === "/router" || text === "/router@") {
@@ -761,7 +811,7 @@ async function handleMessage(message, env, access) {
     return;
   }
   if (text.startsWith("/router ")) {
-    await handleRouterTextCommand(message, env, access);
+    await handleRouterTextCommand(normalizedMessage, env, access);
     return;
   }
   if (text.startsWith("/routers")) {
@@ -777,8 +827,8 @@ async function handleMessage(message, env, access) {
 }
 
 function rootKeyboard(access) {
-  const rows = [[{ text: "🛜 节点中心", callback_data: "rn:home" }, { text: "🌐 Pages 地址", callback_data: "rn:pages" }]];
-  if (can(access, "admin")) rows.push([{ text: "⚙️ Bot 设置", callback_data: "rn:settings" }]);
+  const rows = [[{ text: "🛜 节点管理", callback_data: "rn:home" }]];
+  if (can(access, "admin")) rows[0].push({ text: "⚙️ Bot 管理", callback_data: "rn:settings" });
   return { inline_keyboard: rows };
 }
 
@@ -812,7 +862,7 @@ function routerHomeKeyboard(access) {
     [{ text: "📋 状态汇总", callback_data: "rn:summary" }, { text: "🚨 异常设备", callback_data: "rn:bad:0" }],
     [{ text: "📡 所有设备", callback_data: "rn:list:0" }]
   ];
-  if (can(access, "admin")) rows[1].push({ text: "➕ 添加设备", callback_data: "rn:add" });
+  if (can(access, "operator")) rows[1].push({ text: "➕ 添加设备", callback_data: "rn:add" });
   rows.push([{ text: "🏠 主菜单", callback_data: "root" }]);
   return { inline_keyboard: rows };
 }
@@ -821,6 +871,7 @@ async function handleCallback(query, env, access) {
   const data = String(query.data || "");
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
+  if (data.startsWith('gm:')) return groupCallback(query, env, access, groupServices);
   if (data === "root") return editMenu(env, chatId, messageId, "<b>控制中心</b>\n", rootKeyboard(access));
   if (data === "rn:pages") return showPagesAddress(env, chatId, messageId, access);
   if (data === "delete:this") return tg(env, "deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
@@ -829,7 +880,7 @@ async function handleCallback(query, env, access) {
   if (data === "rn:settings") return showBotSettings(env, chatId, messageId, access);
   if (data.startsWith("rn:perm:")) return handlePermissionCallback(query, env, access);
   if (data === "rn:home") return editRouterHome(env, chatId, messageId, access);
-  if (data === "rn:add") return can(access, "admin") ? createPairCode(env, chatId, messageId, query.from.id) : denyMenu(env, chatId, messageId, access);
+  if (data === "rn:add") return can(access, "operator") ? createPairCode(env, chatId, messageId, query.from.id) : denyMenu(env, chatId, messageId, access);
   if (data === "rn:summary") return showSummary(env, chatId, messageId, access);
 
   const parts = data.split(":");
@@ -851,7 +902,7 @@ async function handleCallback(query, env, access) {
     const d = await getDevice(env, id);
     if (!d) return editRouterHome(env, chatId, messageId, access);
     const isVps = safeStatus(d.status_json).device_type === "vps";
-    if (command === "reboot_ask") return can(access, "admin") ? confirmDeviceReboot(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
+    if (command === "reboot_ask") return can(access, "operator") ? confirmDeviceReboot(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
     const allowed = isVps
       ? ["status", "restart_xray", "update_xray", "reboot"]
       : ["status", "restart_singbox", "ddns_refresh", "reboot"];
@@ -862,8 +913,8 @@ async function handleCallback(query, env, access) {
   if (action === "refresh") return requestRefresh(env, chatId, messageId, id, access, query.from.id);
   if (action === "mute") return can(access, "operator") ? showMuteMenu(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
   if (action === "muteset") return can(access, "operator") ? setMute(env, chatId, messageId, id, Number(parts[3]), access) : denyMenu(env, chatId, messageId, access);
-  if (action === "remove") return can(access, "admin") ? confirmRemove(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
-  if (action === "removeok") return can(access, "admin") ? removeDevice(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
+  if (action === "remove") return can(access, "operator") ? confirmRemove(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
+  if (action === "removeok") return can(access, "operator") ? removeDevice(env, chatId, messageId, id, access) : denyMenu(env, chatId, messageId, access);
 }
 
 async function denyMenu(env, chatId, messageId, access) {
@@ -890,10 +941,7 @@ async function showBotSettings(env, chatId, messageId, access) {
     env.DB.prepare("SELECT COUNT(*) c FROM bot_users WHERE enabled=1").first(),
     env.DB.prepare("SELECT COUNT(*) c FROM bot_groups WHERE enabled=1").first()
   ]);
-  const text = `<b>⚙️ Bot 设置 · 权限管理</b>\n\n` +
-    `额外用户：${numberValue(users?.c)}\n已授权群聊：${numberValue(groups?.c)}\n\n` +
-    `内置 Owner 始终保留最高管理员权限，不能在这里删除。\n` +
-    `群内需要先将 Bot 加入群；Owner 在群内发送 <code>/id</code> 可取得群 ID。`;
+  const text = `<b>⚙️ Bot 管理</b>\n\n用户 ${numberValue(users?.c)} · 群聊 ${numberValue(groups?.c)}\n所有管理员权限相同；至少保留一位。`;
   return editMenu(env, chatId, messageId, text, settingsKeyboard());
 }
 
@@ -902,11 +950,7 @@ function permissionHelpKeyboard() {
 }
 
 function permissionHelpText() {
-  return `<b>📖 权限说明</b>\n\n` +
-    `<b>只读</b>：查看设备、完整状态、节点、SSH、外部探测、请求刷新。\n` +
-    `<b>控制</b>：包含只读；可执行状态查询、重启 Xray/代理、刷新 DDNS、告警静音。\n` +
-    `<b>管理员</b>：最高权限；可执行全部命令、root Shell、重启整机、直接修改节点底层配置及管理 Bot 权限。\n\n` +
-    `群聊可设为“群内全部成员”或“仅指定成员”。群全员仅允许只读或控制；管理员只能授予单独用户或群内指定成员。群内只有 @Bot 的消息才会回复。`;
+  return '<b>用户权限</b>\n\n管理员：所有设备操作、Bot 设置、添加/删除用户与管理员、群规则。\n控制：设备查询、节点配置、服务维护、重启、root Shell；不可管理 Bot。\n只读：设备状态、节点与 SSH 信息、查询刷新；不可修改配置。\n\n<b>群聊</b>\n启用群后继承用户权限；全员只读默认关闭。Telegram 群管理员只获得管群命令权限，不自动获得设备权限。';
 }
 
 function userPermissionKeyboard() {
@@ -921,16 +965,10 @@ function userPermissionKeyboard() {
 }
 
 function groupPermissionKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "➕ 群全员只读", callback_data: "rn:perm:ga:all:viewer" }, { text: "➕ 群全员控制", callback_data: "rn:perm:ga:all:operator" }],
-      [{ text: "➕ 建立指定成员群", callback_data: "rn:perm:ga:members:viewer" }],
-      [{ text: "➕ 指定成员只读", callback_data: "rn:perm:ma:viewer" }, { text: "➕ 指定成员控制", callback_data: "rn:perm:ma:operator" }],
-      [{ text: "➕ 指定成员管理员", callback_data: "rn:perm:ma:admin" }, { text: "➖ 删除指定成员", callback_data: "rn:perm:md" }],
-      [{ text: "➖ 删除群权限", callback_data: "rn:perm:gd" }, { text: "📋 群权限列表", callback_data: "rn:perm:gl" }],
-      [{ text: "⬅️ 返回 Bot 设置", callback_data: "rn:settings" }]
-    ]
-  };
+  return {inline_keyboard: [
+    [{text:'➕ 启用群聊',callback_data:'gm:add'},{text:'👥 群列表 / 设置',callback_data:'gm:list:0'}],
+    [{text:'⬅️ Bot 管理',callback_data:'rn:settings'}]
+  ]};
 }
 
 async function savePendingInput(env, actorId, action, data = {}) {
@@ -942,9 +980,9 @@ async function savePendingInput(env, actorId, action, data = {}) {
 }
 
 async function promptPermissionInput(env, query, action, data, text, keyboard) {
-  await savePendingInput(env, query.from.id, action, data);
+  await savePendingInput(env, query.from.id, action, {...data, chat: String(query.message.chat.id)});
   return editMenu(env, query.message.chat.id, query.message.message_id,
-    `${text}\n\n<b>10 分钟内直接发送即可；不会公开显示敏感节点信息。</b>`, keyboard);
+    `${text}\n\n10 分钟内发送；群内请在内容前加 @Bot用户名。`, keyboard);
 }
 
 async function handlePermissionCallback(query, env, access) {
@@ -954,35 +992,30 @@ async function handlePermissionCallback(query, env, access) {
   const parts = String(query.data || "").split(":");
   const op = parts[2] || "";
   if (op === "help") return editMenu(env, chatId, messageId, permissionHelpText(), permissionHelpKeyboard());
-  if (op === "users") return editMenu(env, chatId, messageId, "<b>👤 用户权限</b>\n\n添加后，对方需在 Bot 私聊发送 /start。", userPermissionKeyboard());
-  if (op === "groups") return editMenu(env, chatId, messageId, "<b>👥 群聊权限</b>\n\n先把 Bot 加进目标群；Owner 在群内发送 <code>/id</code> 取得群 ID。重复添加同一群可直接修改模式或角色。", groupPermissionKeyboard());
+  if (op === "users") return editMenu(env, chatId, messageId, "<b>👤 用户权限</b>\n重复添加 ID 可更改角色。私聊和已启用群使用同一权限。", userPermissionKeyboard());
+  if (op === "groups") return editMenu(env, chatId, messageId, "<b>👥 群聊管理</b>\n启用群后可配置全员只读、内容规则和入群验证。", groupPermissionKeyboard());
   if (op === "ua" && normalRole(parts[3])) return promptPermissionInput(env, query, "user_add", { role: parts[3] }, `请输入要添加为「${roleLabel(parts[3])}」的 Telegram 用户数字 ID：`, userPermissionKeyboard());
   if (op === "ud") return promptPermissionInput(env, query, "user_delete", {}, "请输入要删除的 Telegram 用户数字 ID：", userPermissionKeyboard());
-  if (op === "ga" && (parts[3] === "all" || parts[3] === "members") && normalRole(parts[4]) && !(parts[3] === "all" && parts[4] === "admin")) {
-    const kind = parts[3] === "all" ? "群内全部成员" : "仅指定成员";
-    return promptPermissionInput(env, query, "group_add", { mode: parts[3], role: parts[4] }, `请输入群 ID；将设置为「${kind} · ${roleLabel(parts[4])}」。`, groupPermissionKeyboard());
-  }
-  if (op === "gd") return promptPermissionInput(env, query, "group_delete", {}, "请输入要删除授权的群 ID：", groupPermissionKeyboard());
-  if (op === "ma" && normalRole(parts[3])) return promptPermissionInput(env, query, "member_add", { role: parts[3] }, `请输入「群ID 用户ID」；该成员将获得「${roleLabel(parts[3])}」。`, groupPermissionKeyboard());
-  if (op === "md") return promptPermissionInput(env, query, "member_delete", {}, "请输入「群ID 用户ID」以移除指定成员：", groupPermissionKeyboard());
-  if (op === "ul") return showPermissionUsers(env, chatId, messageId);
-  if (op === "gl") return showPermissionGroups(env, chatId, messageId);
+  if (op === "ul") return showPermissionUsers(env, chatId, messageId, Number(parts[3]) || 0);
+  if (op === "gl") return groupCallback({...query, data:"gm:list:0"}, env, access, groupServices);
   return showBotSettings(env, chatId, messageId, access);
 }
 
-async function consumePendingInput(message, env) {
+async function consumePendingInput(message, env, access) {
   const actorId = String(message.from.id);
   const pending = await env.DB.prepare("SELECT action,data_json,expires_at FROM bot_pending_inputs WHERE actor_id=?").bind(actorId).first();
   if (!pending) return false;
-  await env.DB.prepare("DELETE FROM bot_pending_inputs WHERE actor_id=?").bind(actorId).run();
+  const data = safeStatus(pending.data_json);
+  if (String(data.chat || '') !== String(message.chat.id)) return false;
+  if (!can(access, pending.action === 'node_input' ? 'operator' : 'admin')) return false;
+  await env.DB.prepare("DELETE FROM bot_pending_inputs WHERE actor_id=? AND data_json=?").bind(actorId, pending.data_json).run();
   if (numberValue(pending.expires_at) < nowSeconds()) {
     await tg(env, "sendMessage", { chat_id: message.chat.id, text: "输入已过期，请在 Bot 设置中重新点选操作。" });
     return true;
   }
   const input = String(message.text || "").trim();
   if (input.startsWith("/")) return false;
-  let data = {};
-  try { data = JSON.parse(pending.data_json || "{}"); } catch (_) {}
+  if (pending.action.startsWith('group_')) return groupInput(message, env, pending.action, data, groupServices);
   if (pending.action === "node_input") {
     await previewNodeEdit(env, actorId, message.chat.id, null, data.id, data.field, input);
     return true;
@@ -992,55 +1025,28 @@ async function consumePendingInput(message, env) {
   if (pending.action === "user_add" && idOk(input) && normalRole(data.role)) {
     const now = nowSeconds();
     await env.DB.prepare(`INSERT INTO bot_users(user_id,role,added_by,created_at,updated_at,enabled) VALUES(?,?,?,?,?,1)
-      ON CONFLICT(user_id) DO UPDATE SET role=excluded.role,added_by=excluded.added_by,updated_at=excluded.updated_at,enabled=1`).bind(input, data.role, actorId, now, now).run();
-    result = `✅ 已授权用户 <code>${input}</code>：${roleLabel(data.role)}`;
+      ON CONFLICT(user_id) DO UPDATE SET role=excluded.role,added_by=excluded.added_by,updated_at=excluded.updated_at,enabled=1
+      WHERE bot_users.role<>'admin' OR bot_users.enabled=0 OR excluded.role='admin'
+        OR (SELECT COUNT(*) FROM bot_users WHERE role='admin' AND enabled=1)>1`).bind(input, data.role, actorId, now, now).run().then(r => {
+          result = r.meta.changes ? `✅ 已设置 <code>${input}</code>：${roleLabel(data.role)}` : '必须保留至少一位管理员。';
+        });
   } else if (pending.action === "user_delete" && idOk(input)) {
-    await env.DB.prepare("DELETE FROM bot_users WHERE user_id=?").bind(input).run();
-    result = `✅ 已删除用户 <code>${input}</code> 的额外权限（Owner 不受影响）。`;
-  } else if (pending.action === "group_add" && idOk(input, true) && (data.mode === "all" || data.mode === "members") && normalRole(data.role) && !(data.mode === "all" && data.role === "admin")) {
-    const now = nowSeconds();
-    await env.DB.prepare(`INSERT INTO bot_groups(chat_id,title,access_mode,role,added_by,created_at,updated_at,enabled) VALUES(?,?,?,?,?,?,?,1)
-      ON CONFLICT(chat_id) DO UPDATE SET access_mode=excluded.access_mode,role=excluded.role,added_by=excluded.added_by,updated_at=excluded.updated_at,enabled=1`).bind(input, "", data.mode, data.role, actorId, now, now).run();
-    result = `✅ 已设置群 <code>${input}</code>：${data.mode === "all" ? "全员" : "仅指定成员"} · ${roleLabel(data.role)}`;
-  } else if ((pending.action === "member_add" || pending.action === "member_delete") && input.split(/\s+/).length === 2) {
-    const [groupId, userId] = input.split(/\s+/);
-    if (!idOk(groupId, true) || !idOk(userId)) result = "❌ 格式不正确，应为：群ID 用户ID";
-    else if (pending.action === "member_add" && normalRole(data.role)) {
-      const group = await env.DB.prepare("SELECT chat_id FROM bot_groups WHERE chat_id=? AND enabled=1").bind(groupId).first();
-      if (!group) result = "❌ 群尚未授权，请先添加群权限。";
-      else {
-        await env.DB.prepare(`INSERT INTO bot_group_members(chat_id,user_id,role,added_by,created_at) VALUES(?,?,?,?,?)
-          ON CONFLICT(chat_id,user_id) DO UPDATE SET role=excluded.role,added_by=excluded.added_by,created_at=excluded.created_at`).bind(groupId, userId, data.role, actorId, nowSeconds()).run();
-        result = `✅ 已设置群成员 <code>${userId}</code>：${roleLabel(data.role)}`;
-      }
-    } else {
-      await env.DB.prepare("DELETE FROM bot_group_members WHERE chat_id=? AND user_id=?").bind(groupId, userId).run();
-      result = `✅ 已移除群成员 <code>${userId}</code> 的权限。`;
-    }
-  } else if (pending.action === "group_delete" && idOk(input, true)) {
-    await env.DB.prepare("DELETE FROM bot_group_members WHERE chat_id=?").bind(input).run();
-    await env.DB.prepare("DELETE FROM bot_groups WHERE chat_id=?").bind(input).run();
-    result = `✅ 已删除群 <code>${input}</code> 的权限及成员列表。`;
+    const r = await env.DB.prepare("DELETE FROM bot_users WHERE user_id=? AND (role<>'admin' OR enabled=0 OR (SELECT COUNT(*) FROM bot_users WHERE role='admin' AND enabled=1)>1)").bind(input).run();
+    result = r.meta.changes ? `✅ 已删除 <code>${input}</code> 的授权。` : '用户不存在，或这是最后一位管理员。';
   } else result = "❌ 输入格式不正确；请重新从 Bot 设置点选对应操作。";
   await tg(env, "sendMessage", { chat_id: message.chat.id, text: result, parse_mode: "HTML", reply_markup: settingsKeyboard() });
   return true;
 }
 
-async function showPermissionUsers(env, chatId, messageId) {
-  const rows = (await env.DB.prepare("SELECT user_id,role,updated_at FROM bot_users WHERE enabled=1 ORDER BY updated_at DESC LIMIT 40").all()).results || [];
-  const lines = rows.length ? rows.map((r) => `• <code>${escapeHtml(r.user_id)}</code> · ${roleLabel(r.role)}`) : ["（暂无额外用户）"];
-  return editMenu(env, chatId, messageId, `<b>📋 用户权限</b>\n\n${lines.join("\n")}`, userPermissionKeyboard());
-}
-
-async function showPermissionGroups(env, chatId, messageId) {
-  const rows = (await env.DB.prepare(`SELECT g.chat_id,g.access_mode,g.role,COUNT(m.user_id) members
-    FROM bot_groups g LEFT JOIN bot_group_members m ON m.chat_id=g.chat_id WHERE g.enabled=1
-    GROUP BY g.chat_id,g.access_mode,g.role ORDER BY g.updated_at DESC LIMIT 40`).all()).results || [];
-  const lines = rows.length ? rows.map((r) => {
-    const effectiveRole = r.access_mode === "all" && r.role === "admin" ? "operator" : r.role;
-    return `• <code>${escapeHtml(r.chat_id)}</code> · ${r.access_mode === "all" ? "全员" : `指定成员 ${numberValue(r.members)} 人`} · ${roleLabel(effectiveRole)}`;
-  }) : ["（暂无已授权群）"];
-  return editMenu(env, chatId, messageId, `<b>📋 群聊权限</b>\n\n${lines.join("\n")}`, groupPermissionKeyboard());
+async function showPermissionUsers(env, chatId, messageId, page=0) {
+  page=Math.max(0,Math.min(10000,Math.floor(page)));
+  const rows = (await env.DB.prepare("SELECT user_id,role,updated_at FROM bot_users WHERE enabled=1 ORDER BY role,user_id LIMIT 9 OFFSET ?").bind(page*8).all()).results || [];
+  const lines = rows.length ? rows.slice(0,8).map((r) => `• <code>${escapeHtml(r.user_id)}</code> · ${roleLabel(r.role)}`) : ["暂无用户"];
+  const keys=userPermissionKeyboard(),nav=[];
+  if(page)nav.push({text:'上一页',callback_data:`rn:perm:ul:${page-1}`});
+  if(rows.length>8)nav.push({text:'下一页',callback_data:`rn:perm:ul:${page+1}`});
+  if(nav.length)keys.inline_keyboard.unshift(nav);
+  return editMenu(env, chatId, messageId, `<b>📋 用户权限</b>\n\n${lines.join("\n")}`, keys);
 }
 
 async function editMenu(env, chatId, messageId, text, replyMarkup) {
@@ -1106,7 +1112,7 @@ function vpsCommandHelp(deviceId = "设备ID") {
     `<code>/vps ${deviceId} update-xray</code>\n` +
     `<code>/vps ${deviceId} reboot</code>\n` +
     `<code>/vps ${deviceId} shell 命令</code>\n\n` +
-    `Shell 以 root 执行，最长 120 秒。仅限 Bot 管理员私聊。`;
+    `Shell 以 root 执行，最长 120 秒。控制用户和管理员可用；群内命令加 @Bot用户名。`;
 }
 
 async function handleVpsTextCommand(message, env, access) {
@@ -1140,7 +1146,7 @@ function routerCommandHelp(deviceId = "设备ID") {
     `<code>/router ${deviceId} ddns</code>\n` +
     `<code>/router ${deviceId} reboot</code>\n` +
     `<code>/router ${deviceId} shell 命令</code>\n\n` +
-    `Shell 以 root 执行，最长 120 秒。仅限 Bot 管理员私聊。`;
+    `Shell 以 root 执行，最长 120 秒。控制用户和管理员可用；群内命令加 @Bot用户名。`;
 }
 
 async function handleRouterTextCommand(message, env, access) {
@@ -1175,8 +1181,7 @@ async function createPairCode(env, chatId, messageId, ownerId) {
   await env.DB.prepare(
     "INSERT INTO pair_codes(code_hash,created_by,created_at,expires_at,used_at) VALUES(?,?,?,?,NULL)"
   ).bind(hash, String(ownerId), now, now + PAIR_TTL_SECONDS).run();
-  const text = `<b>➕ 添加设备</b>\n\n一次性配对码：\n<code>${code}</code>\n\n有效期10分钟，只能使用一次。` +
-    `\n在路由器或 VPS 安装脚本中填写监控入口和此配对码。`;
+  const text = `<b>➕ 配对路由器 / VPS</b>\n\nPages 地址：\n<code>${escapeHtml(publicPagesUrl(env) || '尚未登记，请部署 Pages 网关')}</code>\n\n配对码：\n<code>${code}</code>\n\n10 分钟有效 · 仅一次`;
   return editMenu(env, chatId, messageId, text, {
     inline_keyboard: [
       [{ text: "重新生成", callback_data: "rn:add" }],
@@ -1245,12 +1250,12 @@ async function showDevice(env, chatId, messageId, id, access) {
   const keyboard = [
     [{ text: "📊 完整状态", callback_data: `rn:status:${id}` }, { text: "🌐 外部探测", callback_data: `rn:probe:${id}` }],
     [{ text: "🔗 当前节点", callback_data: `rn:node:${id}` }, { text: "🖥 SSH 地址", callback_data: `rn:ssh:${id}` }],
-    [{ text: "⚡ 实时刷新", callback_data: `rn:refresh:${id}` }, { text: "🛠 远程控制", callback_data: `rn:ctl:${id}` }],
+    [{ text: "⚡ 实时刷新", callback_data: `rn:refresh:${id}` }, ...(can(access,'operator') ? [{ text: "🛠 远程控制", callback_data: `rn:ctl:${id}` }] : [])],
     ...(can(access, "operator") ? [[
-      ...(can(access, "admin") ? [{ text: "⚙️ 节点配置", callback_data: `rn:cfg:${id}` }] : []),
+      ...(can(access, "operator") ? [{ text: "⚙️ 节点配置", callback_data: `rn:cfg:${id}` }] : []),
       { text: muted ? "🔔 解除静音" : "🔕 告警静音", callback_data: `rn:mute:${id}` }
     ]] : []),
-    ...(can(access, "admin") ? [[{ text: "🗑 移除设备", callback_data: `rn:remove:${id}` }]] : []),
+    ...(can(access, "operator") ? [[{ text: "🗑 移除设备", callback_data: `rn:remove:${id}` }]] : []),
     [{ text: "⬅️ 设备列表", callback_data: "rn:list:0" }, { text: "🏠 主菜单", callback_data: "root" }]
   ];
   return editMenu(env, chatId, messageId, text, { inline_keyboard: keyboard });
@@ -1466,24 +1471,20 @@ async function showDeviceControl(env, chatId, messageId, id, access) {
   const shellExample = isVps
     ? `/vps ${d.id} shell uname -a`
     : `/router ${d.id} shell logread | tail -50`;
-  const text = `<b>🛠 ${escapeHtml(d.name)} · ${kind}远程控制</b>\n\n` +
-    `设备 ID：<code>${d.id}</code>\n` +
-    `命令由设备主动通过认证通道领取，通常10秒内开始；无需开放额外管理端口。\n\n` +
-    `${can(access, "admin") ? `任意 root Shell：\n<code>${escapeHtml(shellExample)}</code>\n\n` : ""}` +
-    `当前权限：${roleLabel(access.role)}。${can(access, "admin") ? "管理员可使用 root Shell 与整机重启。" : "整机重启与 root Shell 仅限管理员。"}`;
+  const text = `<b>🛠 ${escapeHtml(d.name)} · ${kind}操作</b>\n\nRoot Shell：\n<code>${escapeHtml(shellExample)}</code>\n\n群内命令需加 @Bot用户名。`;
   const keyboard = isVps
     ? [
         [{ text: "📊 立即查询", callback_data: `rn:cmd:${id}:status` }],
         [{ text: "🔄 重启 Xray", callback_data: `rn:cmd:${id}:restart_xray` }],
         [{ text: "⬆️ 更新 Xray", callback_data: `rn:cmd:${id}:update_xray` }],
-        ...(can(access, "admin") ? [[{ text: "⏻ 重启 VPS", callback_data: `rn:cmd:${id}:reboot_ask` }]] : []),
+        ...(can(access, "operator") ? [[{ text: "⏻ 重启 VPS", callback_data: `rn:cmd:${id}:reboot_ask` }]] : []),
         [{ text: "⬅️ 返回设备", callback_data: `rn:d:${id}` }]
       ]
     : [
         [{ text: "📊 立即查询", callback_data: `rn:cmd:${id}:status` }],
         [{ text: s.service_name === "Xray" ? "🔄 重启家宽 Xray" : "🔄 重启 sing-box", callback_data: `rn:cmd:${id}:restart_singbox` }],
         [{ text: "🌐 立即刷新 DDNS", callback_data: `rn:cmd:${id}:ddns_refresh` }],
-        ...(can(access, "admin") ? [[{ text: "⏻ 重启路由器", callback_data: `rn:cmd:${id}:reboot_ask` }]] : []),
+        ...(can(access, "operator") ? [[{ text: "⏻ 重启路由器", callback_data: `rn:cmd:${id}:reboot_ask` }]] : []),
         [{ text: "⬅️ 返回设备", callback_data: `rn:d:${id}` }]
       ];
   return editMenu(env, chatId, messageId, text, { inline_keyboard: keyboard });
@@ -1520,9 +1521,9 @@ async function enqueueDeviceCommand(env, chatId, messageId, id, action, payload,
     ? new Set(["status", "refresh", "restart_xray", "update_xray", "reboot", "shell", "node_config"])
     : new Set(["status", "refresh", "restart_singbox", "ddns_refresh", "reboot", "shell", "node_config"]);
   if (!allowed.has(action)) return;
-  const requiredRole = (["shell", "reboot", "node_config"].includes(action)) ? "admin" : ["status", "refresh"].includes(action) ? "viewer" : "operator";
+  const requiredRole = commandRole(action);
   if (!can(access, requiredRole)) {
-    const text = `权限不足：${action === "shell" || action === "reboot" ? "root Shell 与整机重启需要管理员权限。" : "此操作需要控制权限。"}`;
+    const text = '此操作需要控制用户或管理员权限。';
     if (edit && messageId) return editMenu(env, chatId, messageId, text, { inline_keyboard: [[{ text: "返回设备", callback_data: `rn:d:${id}` }]] });
     return tg(env, "sendMessage", { chat_id: chatId, text });
   }
@@ -1625,6 +1626,8 @@ async function showSummary(env, chatId, messageId, access) {
 
 async function runScheduled(env, scheduledAt) {
   const now = scheduledAt || nowSeconds();
+  await initializeAdmins(env);
+  await groupMaintenance(env, groupServices);
   const offlineSeconds = envInt(env, "OFFLINE_MINUTES", 15, 5, 1440) * 60;
   const cutoff = now - offlineSeconds;
   const offlineRows = (await env.DB.prepare(
@@ -1771,8 +1774,8 @@ function validNodeValue(field, value) {
 }
 async function nodeEditCallback(query, env, access) {
   const chatId = query.message.chat.id, mid = query.message.message_id;
-  if (!can(access, 'admin')) {
-    return editMenu(env, chatId, mid, '只有管理员可以修改节点配置。', rootKeyboard(access));
+  if (!can(access, 'operator')) {
+    return editMenu(env, chatId, mid, '需要控制用户或管理员权限。', rootKeyboard(access));
   }
   const [, action, id, field] = query.data.split(':');
   const d = await getDevice(env, id);
@@ -1801,7 +1804,7 @@ async function nodeEditCallback(query, env, access) {
   if (!NODE_FIELDS[field]) return;
   if (action === 'cfgr' && field === 'keys') return previewNodeEdit(env,query.from.id,chatId,mid,id,field,'random');
   if (action === 'cfgi') {
-    await savePendingInput(env, query.from.id, 'node_input', {id,field});
+    await savePendingInput(env, query.from.id, 'node_input', {id,field,chat:String(chatId)});
     const hint = field === 'sni' ? '请输入域名（目标同步为该域名:443）。' : field === 'target' ? '请输入域名:端口（保留 SNI）。' : field === 'port' ? '请输入端口 1–65535。' : '请输入新值，或发送 random 随机生成。';
     return editMenu(env,chatId,mid,`<b>${NODE_FIELDS[field]}</b>\n${hint}`,{inline_keyboard:[[{text:'取消',callback_data:`rn:cfg:${id}`}]]});
   }
