@@ -4,7 +4,7 @@
 
 当前仓库为 `sajik1/node-suite`。Cloudflare 3.6.0 新增统一三级权限、群聊管理和入群验证。已安装的路由器/VPS 不需要更新，本次只需重新部署 Cloudflare。
 
-下面 Cloudflare 命令固定到本次代码提交 `c21e4fbfdadcc451ea059f2f4acc6f70eb8f9437`；路由器/VPS 命令保留已有稳定提交，不会随 `main` 分支变化。
+下面 Cloudflare 命令固定到本次代码提交 `4d62120aa7b05dcb660993d1330a6e17bb54b8f6`；路由器/VPS 命令保留已有稳定提交，不会随 `main` 分支变化。
 
 保留此前 VPS 1.1.2 hotfix：
 
@@ -22,7 +22,7 @@ set -eu
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
-git checkout --detach c21e4fbfdadcc451ea059f2f4acc6f70eb8f9437
+git checkout --detach 4d62120aa7b05dcb660993d1330a6e17bb54b8f6
 bash -n cloudflare/deploy-complete.sh
 bash cloudflare/deploy-complete.sh
 )
@@ -106,9 +106,11 @@ VPS 安装器 1.1.2 会固定读取 `v1.1` 的完整基础安装器，在本机�
 - **管理员**：所有功能，包括添加/删除用户与管理员、Bot 设置、群规则；至少保留一位管理员。
 - **控制用户**：设备管理、配对/移除、改节点配置、重启和 root Shell；不能改 Bot 权限。
 - **只读用户**：查询设备、节点与 SSH 信息及刷新状态，不能修改设备配置。
-- Bot 管理 → **群聊管理**：添加/停用群 ID。已授权用户在启用群内继承原角色，群全员只读默认关闭。
-- 群聊命令要 `@Bot用户名`；按钮无需 @。自动管群会检查未 @ 的普通消息和入群事件。
+- Bot 管理 → **群聊管理**：添加/停用群 ID。已授权用户在启用群内继承原角色；“全员可用 Bot”默认关闭，开启后普通群成员获得只读使用权，管理员始终可用。
+- 群聊命令要 `@Bot用户名`；按钮无需 @。自动管群会检查未 @ 的普通消息、编辑后的消息和入群事件。
 - 管群支持屏蔽词、内容自动删除/禁言/封禁、防刷屏、入群验证、欢迎语和群规；均默认关闭，需为 Bot 授予相应群管理员权限。
+- 风控规则会检查普通成员、Telegram 群管理员和匿名管理员发出的内容。管理员或匿名管理员命中“禁言/封禁”类规则时，只删除违规消息，不尝试限制管理员本身。
+- Telegram 开启“匿名管理员/保持匿名”后，Bot 收到的是群身份而不是真实用户身份，因此可以过滤和删除违规消息，但无法还原该匿名管理员的真实名字，也无法按真实用户执行禁言/封禁。若要群消息显示个人名字，请关闭对应管理员的匿名模式。
 
 详细步骤与命令：[Telegram 管理说明](docs/telegram-management.md)。
 
