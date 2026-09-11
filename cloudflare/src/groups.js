@@ -83,14 +83,14 @@ export async function groupPanel(env,chat,mid,id,h) {
   if(!g) return h.editMenu(env,chat,mid,'该群未启用。',{inline_keyboard:[[button('群列表','gm:list:0')]]});
   const p=await policy(env,id);
   const on=v=>v?'开':'关';
-  return h.editMenu(env,chat,mid,`<b>👥 ${h.escapeHtml(g.title||id)}</b>\n<code>${id}</code>\n全局用户权限在本群生效。`,{inline_keyboard:[
-    [button(`全员只读：${on(g.access_mode==='all' && g.role==='viewer')}`,`gm:read:${id}:${g.access_mode==='all'?'0':'1'}`)],
-    [button('🧹 内容过滤',`gm:rules:${id}:0`),button('➕ 屏蔽词',`gm:choose:${id}:keyword`)],
-    [button(`入群验证：${on(p.verify)}`,`gm:verify:${id}:${p.verify?'0':'1'}`),button(`防刷屏：${on(p.flood)}`,`gm:flood:${id}:${p.flood?'0':'1'}`)],
-    [button(`清理进退群通知：${on(p.clean)}`,`gm:clean:${id}:${p.clean?'0':'1'}`)],
-    [button('编辑欢迎语',`gm:welcome:${id}`),button('编辑群规',`gm:ruletext:${id}`)],
-    [button('管群命令',`gm:help:${id}`),button('权限检查',`gm:check:${id}`)],
-    [button('最近处理记录',`gm:audit:${id}`),button('停用机器人',`gm:remove:${id}`)],
+  return h.editMenu(env,chat,mid,`<b>👥 ${h.escapeHtml(g.title||id)}</b>\n<code>${id}</code>\n开启「全员可用 Bot」后，普通成员获得只读使用权；关闭后仅已授权用户可用。管理员始终可用。`,{inline_keyboard:[
+    [button(`🤖 全员可用 Bot：${on(g.access_mode==='all' && g.role==='viewer')}`,`gm:read:${id}:${g.access_mode==='all'?'0':'1'}`)],
+    [button('🛡 风控规则',`gm:rules:${id}:0`),button('🚫 添加屏蔽词',`gm:choose:${id}:keyword`)],
+    [button(`✅ 入群验证：${on(p.verify)}`,`gm:verify:${id}:${p.verify?'0':'1'}`),button(`⚡ 防刷屏：${on(p.flood)}`,`gm:flood:${id}:${p.flood?'0':'1'}`)],
+    [button(`🧹 清理进退群通知：${on(p.clean)}`,`gm:clean:${id}:${p.clean?'0':'1'}`)],
+    [button('👋 编辑欢迎语',`gm:welcome:${id}`),button('📜 编辑群规',`gm:ruletext:${id}`)],
+    [button('🛠 管群命令',`gm:help:${id}`),button('🔐 权限检查',`gm:check:${id}`)],
+    [button('📋 处理记录',`gm:audit:${id}`),button('⛔ 停用机器人',`gm:remove:${id}`)],
     [button('⬅️ 群列表','gm:list:0')]
   ]});
 }
@@ -100,7 +100,7 @@ export async function groupCallback(query,env,access,h) {
   if(!h.can(access,'admin')) return tell(env,chat,'需要 Bot 管理员权限。',h);
   const [,op,id,arg]=String(query.data||'').split(':');
   try {
-    if(op==='add') return prompt(query,env,'group_enable',{},'请输入群数字 ID（负数）；全员只读默认关闭。',h);
+    if(op==='add') return prompt(query,env,'group_enable',{},'请输入群数字 ID（负数）；全员可用 Bot 默认关闭。',h);
     if(op==='list') {
       const page=Math.max(0,Math.min(10000,Number(id)||0));
       const rows=(await env.DB.prepare('SELECT chat_id,title FROM bot_groups WHERE enabled=1 ORDER BY chat_id LIMIT 9 OFFSET ?').bind(page*8).all()).results||[];
@@ -127,7 +127,7 @@ export async function groupCallback(query,env,access,h) {
       const keys=rules.slice(0,8).map(r=>[button(`删除规则：${(r.pattern||TYPES[r.kind]).slice(0,28)}`,`gm:delrule:${id}:${r.id}`)]);
       const nav=[];if(page)nav.push(button('上一页',`gm:rules:${id}:${page-1}`));if(rules.length>8)nav.push(button('下一页',`gm:rules:${id}:${page+1}`));if(nav.length)keys.push(nav);
       keys.push([button('➕ 添加规则',`gm:types:${id}`)],...back(id));
-      return h.editMenu(env,chat,mid,'<b>内容过滤</b>\n'+(text||'暂无规则'),{inline_keyboard:keys});
+      return h.editMenu(env,chat,mid,'<b>🛡 风控规则</b>\n'+(text||'暂无规则'),{inline_keyboard:keys});
     } else if(op==='types') {
       const entries=Object.entries(TYPES),keys=[];
       for(let i=0;i<entries.length;i+=2)keys.push(entries.slice(i,i+2).map(([k,v])=>button(v,`gm:choose:${id}:${k}`)));
@@ -158,7 +158,7 @@ export async function groupCallback(query,env,access,h) {
       return h.editMenu(env,chat,mid,`✅ 删除消息、限制成员权限正常\n群类型：${h.escapeHtml(detail.type)}\n置顶还需 Telegram 的置顶消息权限。`,{inline_keyboard:back(id)});
     } else if(op==='audit') {
       const rows=(await env.DB.prepare('SELECT actor_id,target_id,action,created_at FROM group_audit WHERE chat_id=? ORDER BY id DESC LIMIT 12').bind(id).all()).results||[];
-      return h.editMenu(env,chat,mid,'<b>最近处理</b>\n'+(rows.map(r=>`${new Date(r.created_at*1000).toISOString().slice(5,16)} UTC · ${h.escapeHtml(r.action)} · ${h.escapeHtml(r.target_id)}`).join('\n')||'暂无'),{inline_keyboard:back(id)});
+      return h.editMenu(env,chat,mid,'<b>📋 最近处理</b>\n'+(rows.map(r=>`${new Date(r.created_at*1000).toISOString().slice(5,16)} UTC · ${h.escapeHtml(r.action)} · ${h.escapeHtml(r.target_id)}`).join('\n')||'暂无'),{inline_keyboard:back(id)});
     } else return;
     await logAction(env,id,query.from.id,'',`设置:${op}`,h);
     return groupPanel(env,chat,mid,id,h);
@@ -208,7 +208,7 @@ function groupHelp(env) {
   return `<b>管群命令</b>\n回复目标消息使用：\n`+
     ['del','ban','unban','kick','mute 60','unmute','pin','unpin'].map(c=>`<code>/${c.split(' ')[0]}@${bot}${c.includes(' ')?' 60':''}</code>`).join('\n')+
     `\n\n也可 /ban@${bot} 用户ID、/unban@${bot} 用户ID、/mute@${bot} 用户ID 分钟。\n`+
-    `<code>/rules@${bot}</code> 群规\n<code>/id@${bot}</code> 当前群与用户 ID\n\nBot 管理员和 Telegram 群管理员可执行管群命令；不会封禁管理员。`;
+    `<code>/rules@${bot}</code> 群规\n<code>/id@${bot}</code> 当前群与用户 ID\n\nBot 管理员和 Telegram 群管理员可执行管群命令；不会封禁管理员。风控规则仍会检查管理员消息，但管理员/匿名管理员命中限制类规则时只删除消息，不执行禁言或封禁。`;
 }
 async function moderationCommand(message,env,p,h) {
   if(!h.targetsBot(message,env) || message.sender_chat || message.from?.is_bot) return false;
@@ -361,25 +361,37 @@ export async function groupUpdate(update,env,h) {
       if(p.clean)await h.tg(env,'deleteMessage',{chat_id:id,message_id:message.message_id});
       return true;
     }
-    if(!message.from || message.sender_chat || message.from.is_bot) return true;
-    if(!update.edited_message && await moderationCommand(message,env,p,h)) return true;
+
+    // Telegram anonymous administrators arrive as sender_chat (usually with a bot-like from field).
+    // They still pass through risk rules; only user-specific punishment is downgraded to deletion.
+    const anonymous=!!message.sender_chat;
+    const uid=anonymous?'':String(message.from?.id||'');
+    if(!anonymous && (!message.from || message.from.is_bot)) return true;
+    if(!update.edited_message && !anonymous && await moderationCommand(message,env,p,h)) return true;
+
     const rules=(await env.DB.prepare('SELECT * FROM group_rules WHERE chat_id=?').bind(id).all()).results||[];
     let matched=rules.filter(r=>matchRule(r,message)).sort((a,b)=>({delete:1,mute:2,ban:3}[b.action]-{delete:1,mute:2,ban:3}[a.action]))[0];
-    if(p.flood && !update.edited_message) {
+    if(p.flood && !update.edited_message && uid) {
       const window=Math.floor(h.nowSeconds()/10)*10;
       const rate=await env.DB.prepare(`INSERT INTO group_rate(chat_id,user_id,window,count) VALUES(?,?,?,1)
-        ON CONFLICT(chat_id,user_id,window) DO UPDATE SET count=count+1 RETURNING count`).bind(id,String(message.from.id),window).first();
+        ON CONFLICT(chat_id,user_id,window) DO UPDATE SET count=count+1 RETURNING count`).bind(id,uid,window).first();
       if(rate.count>8 && matched?.action!=='ban') matched={action:'mute',kind:'flood'};
     }
-    if(matched && !await protectedUser(env,id,message.from.id,h)) {
+    if(matched) {
+      const protectedSender=uid ? await protectedUser(env,id,uid,h) : true;
+      const action=(anonymous||protectedSender)?'delete':matched.action;
+      const target=uid || `sender_chat:${message.sender_chat?.id||'anonymous'}`;
       const key=`${id}:${message.message_id}:${update.edited_message?message.edit_date||update.update_id:'new'}`;
       const claimed=await env.DB.prepare('INSERT OR IGNORE INTO group_events(id,created_at) VALUES(?,?)').bind(key,h.nowSeconds()).run();
       if(claimed.meta.changes) {
-        await applyAction(env,id,message.from.id,message.message_id,matched.action,h);
-        await logAction(env,id,'auto',message.from.id,`${matched.kind}:${matched.action}`,h);
+        await applyAction(env,id,uid,message.message_id,action,h);
+        const auditAction=action===matched.action?`${matched.kind}:${action}`:`${matched.kind}:${matched.action}->delete`;
+        await logAction(env,id,'auto',target,auditAction,h);
       }
       return true;
     }
+    // Anonymous senders can be filtered but cannot safely use Bot controls because Telegram hides the real actor.
+    if(anonymous) return true;
     // Edited text is filtered, never executed as an administrative command.
     return !!update.edited_message;
   } catch(error) {await reportFailure(env,id,error,h);return true;}
