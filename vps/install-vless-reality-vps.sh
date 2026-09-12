@@ -7,7 +7,7 @@ set -Eeuo pipefail
 #   1) Quantumult X node name == Telegram device name during installation
 #   2) the accidental "vless:// 通用链接：" pseudo-node shown by Telegram
 #   3) raw.githubusercontent.com IPv6/path anomalies by preferring IPv4 and falling back to GitHub Contents API
-#   4) install-time REALITY SNI/target auto-selection from 12 built-in domains by strict TLS compatibility + lowest handshake latency
+#   4) install-time REALITY SNI/target auto-selection from 12 built-in domains by strict TLS compatibility + 3-sample median latency
 
 export LC_ALL=C
 umask 077
@@ -98,29 +98,44 @@ grep -Fq "REALITY_SNI=\"\$(read_default 'REALITY SNI'" "$BASE_FILE" || {
 awk '
 function emit_auto_selector() {
   print "auto_select_reality_target() {"
-  print "  local candidates host log start_ms end_ms ms best_host=\"\" best_ms=\"\" idx=0"
+  print "  local candidates host log start_ms end_ms ms best_host=\"\" best_ms=\"\" idx=0 probe fail a b c x1 x2 x3 tmp median"
   print "  candidates=\"www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.douyin.com www.qq.com www.10086.cn www.10010.com www.189.cn www.bing.com www.tiktok.com\""
   print "  say"
   print "  say \"========== 3A. 自动选择 REALITY SNI / 目标 ==========\""
-  print "  say \"将测试 12 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前机器 TLS 握手延迟最低者。\""
+  print "  say \"将测试 12 个内置域名；每个域名连续严格握手 3 次，3 次均通过 TLS 1.3 / ALPN h2 / 证书校验后取延迟中位数，并选择中位数最低者。\""
   print "  for host in $candidates; do"
   print "    idx=$((idx + 1))"
-  print "    log=\"$STAGE/reality-auto-$idx.log\""
-  print "    start_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
-  print "    timeout -k 1 8 openssl s_client -connect \"${host}:443\" -servername \"$host\" -tls1_3 -alpn h2 -verify_hostname \"$host\" -verify_return_error </dev/null >\"$log\" 2>&1 || true"
-  print "    end_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
-  print "    if grep -q \047Verify return code: 0 (ok)\047 \"$log\" && grep -q \047ALPN protocol: h2\047 \"$log\"; then"
-  print "      case \"$start_ms:$end_ms\" in *[!0-9:]*|:*) ms=999999 ;; *) if (( end_ms >= start_ms )); then ms=$((end_ms - start_ms)); else ms=999999; fi ;; esac"
-  print "      printf \047  ✓ %-22s %6s ms\\n\047 \"${host}:443\" \"$ms\""
-  print "      if [[ -z \"$best_host\" || \"$ms\" -lt \"$best_ms\" ]]; then best_host=\"$host\"; best_ms=\"$ms\"; fi"
+  print "    fail=0; a=; b=; c=; probe=1"
+  print "    while (( probe <= 3 )); do"
+  print "      log=\"$STAGE/reality-auto-$idx-$probe.log\""
+  print "      start_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
+  print "      timeout -k 1 8 openssl s_client -connect \"${host}:443\" -servername \"$host\" -tls1_3 -alpn h2 -verify_hostname \"$host\" -verify_return_error </dev/null >\"$log\" 2>&1 || true"
+  print "      end_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
+  print "      if grep -q \047Verify return code: 0 (ok)\047 \"$log\" && grep -q \047ALPN protocol: h2\047 \"$log\"; then"
+  print "        case \"$start_ms:$end_ms\" in *[!0-9:]*|:*) ms=999999 ;; *) if (( end_ms >= start_ms )); then ms=$((end_ms - start_ms)); else ms=999999; fi ;; esac"
+  print "        case \"$probe\" in 1) a=\"$ms\" ;; 2) b=\"$ms\" ;; 3) c=\"$ms\" ;; esac"
+  print "      else"
+  print "        fail=1"
+  print "        break"
+  print "      fi"
+  print "      ((probe += 1))"
+  print "    done"
+  print "    if (( fail == 0 )) && [[ -n \"$a\" && -n \"$b\" && -n \"$c\" ]]; then"
+  print "      x1=\"$a\"; x2=\"$b\"; x3=\"$c\""
+  print "      if (( x1 > x2 )); then tmp=\"$x1\"; x1=\"$x2\"; x2=\"$tmp\"; fi"
+  print "      if (( x2 > x3 )); then tmp=\"$x2\"; x2=\"$x3\"; x3=\"$tmp\"; fi"
+  print "      if (( x1 > x2 )); then tmp=\"$x1\"; x1=\"$x2\"; x2=\"$tmp\"; fi"
+  print "      median=\"$x2\""
+  print "      printf \047  ✓ %-22s 3次=%s/%s/%s ms  中位数=%s ms\\n\047 \"${host}:443\" \"$a\" \"$b\" \"$c\" \"$median\""
+  print "      if [[ -z \"$best_host\" ]] || (( median < best_ms )); then best_host=\"$host\"; best_ms=\"$median\"; fi"
   print "    else"
-  print "      printf \047  - %-22s 跳过（TLS 1.3 / h2 / 证书 / 连通性未全部通过）\\n\047 \"${host}:443\""
+  print "      printf \047  - %-22s 跳过（3 次严格握手未全部通过）\\n\047 \"${host}:443\""
   print "    fi"
   print "  done"
-  print "  [[ -n \"$best_host\" ]] || die \04712 个内置 REALITY 目标均未通过严格检查；未写业务配置\047"
+  print "  [[ -n \"$best_host\" ]] || die \04712 个内置 REALITY 目标均未通过 3 次严格检查；未写业务配置\047"
   print "  REALITY_SNI=\"$best_host\""
   print "  REALITY_DEST=\"${best_host}:443\""
-  print "  say \"自动选择：SNI=${REALITY_SNI}；目标=${REALITY_DEST}；TLS 握手约 ${best_ms} ms\""
+  print "  say \"自动选择：SNI=${REALITY_SNI}；目标=${REALITY_DEST}；3 次 TLS 握手中位数约 ${best_ms} ms\""
   print "}"
   print ""
 }
@@ -204,6 +219,10 @@ if grep -Fq 'www.baidu.com' "$PATCHED_FILE"; then
   echo '错误：旧百度候选域名仍存在。' >&2
   exit 1
 fi
+grep -Fq '3 次 TLS 握手中位数约 ${best_ms} ms' "$PATCHED_FILE" || {
+  echo '错误：REALITY 三次握手中位数逻辑未注入。' >&2
+  exit 1
+}
 [[ "$(grep -Fc '  auto_select_reality_target' "$PATCHED_FILE")" -eq 1 ]] || {
   echo '错误：REALITY 自动选择调用数量异常。' >&2
   exit 1
