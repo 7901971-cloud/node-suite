@@ -7,9 +7,11 @@
 - Node Suite：`1.2`
 - Cloudflare / Telegram：`3.7.0`
 - Xray：`v26.7.28`
-- 当前固定代码提交：`d5a3ac4d5d90a4b9e23344a6aeb9203dfae2c9bb`
+- 当前固定代码提交：`388448e61825f82185b78d4b8d477b350e48b29c`
 
 下面所有安装命令都固定到这个不可变提交。
+
+当前仓库只保留必要入口：路由器目录对外只有 `install-router-complete.sh` 和 MIPS 离线 Xray 辅助脚本；Cloudflare 对外只执行 `cloudflare/deploy-complete.sh`，其它脚本、源码、schema、Pages Function、依赖锁和测试文件都是它的运行或校验依赖，不需要手工执行。
 
 ## 1. REALITY SNI 自动选择
 
@@ -53,7 +55,7 @@ www.tiktok.com
 ```bash
 (
 set -eu
-REF='d5a3ac4d5d90a4b9e23344a6aeb9203dfae2c9bb'
+REF='388448e61825f82185b78d4b8d477b350e48b29c'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
@@ -85,7 +87,7 @@ curl -sS --noproxy '*' 'https://你的Pages项目.pages.dev/health'
 在 OpenWrt/Kwrt SSH 终端执行：
 
 ```sh
-REF='d5a3ac4d5d90a4b9e23344a6aeb9203dfae2c9bb'
+REF='388448e61825f82185b78d4b8d477b350e48b29c'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -105,7 +107,7 @@ sh "$OUT"
 
 安装器会优先复用现有设备身份、节点端口和密钥，不会主动接管无关 SSH/代理配置。已有 sing-box/SS 备用节点不会在新 VLESS 验收前自动删除。
 
-GitHub Raw 卡住时会自动超时并切换 Contents API；安装器内部获取固定基础脚本也有独立超时和回退。
+仓库中不再放单独的 router base 文件。`install-router-complete.sh` 会自行获取固定且经过 SHA256 校验的内部基础源码，GitHub Raw 超时后自动切换 Contents API，再应用当前补丁并做语法/锚点校验后执行。
 
 ### MIPS/MT7621 离线 Xray
 
@@ -116,7 +118,7 @@ cd ~/Downloads
 rm -rf node-suite-1.2
 git clone https://github.com/sajik1/node-suite.git node-suite-1.2
 cd node-suite-1.2
-git checkout d5a3ac4d5d90a4b9e23344a6aeb9203dfae2c9bb
+git checkout 388448e61825f82185b78d4b8d477b350e48b29c
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -127,7 +129,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu + systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='d5a3ac4d5d90a4b9e23344a6aeb9203dfae2c9bb'
+REF='388448e61825f82185b78d4b8d477b350e48b29c'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'
@@ -237,4 +239,4 @@ npm run check
 npm test
 ```
 
-路由器/VPS脚本提交前必须通过 shell 语法检查，仓库 GitHub Actions 会自动执行。
+路由器/VPS 脚本提交前必须通过 shell 语法检查，仓库 GitHub Actions 会自动执行。
