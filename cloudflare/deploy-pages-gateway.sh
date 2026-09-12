@@ -7,6 +7,37 @@ GATEWAY_DIR="$BASE_DIR/pages-gateway"
 say() { printf '%s\n' "$*"; }
 die() { say "错误：$*" >&2; exit 1; }
 
+retry_capture() {
+  local __outvar="$1" label="$2"
+  shift 2
+  local attempt output rc
+  output=''
+  for attempt in 1 2 3; do
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      printf -v "$__outvar" '%s' "$output"
+      return 0
+    fi
+    say "$label 第 ${attempt}/3 次失败，等待后重试。" >&2
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  printf -v "$__outvar" '%s' "$output"
+  return 1
+}
+
+health_ok() {
+  local url="$1" body
+  body="$(curl -fsS --noproxy '*' --connect-timeout 10 --max-time 25 "$url/health" 2>/dev/null || true)"
+  printf '%s' "$body" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  try { const j=JSON.parse(s); process.exit(j.ok&&j.capabilities?.command_check===true?0:1); }
+  catch (_) { process.exit(1); }
+});'
+}
+
 command -v node >/dev/null 2>&1 || die "请先安装 Node.js 22 或更高版本"
 command -v npm >/dev/null 2>&1 || die "没有找到 npm"
 command -v curl >/dev/null 2>&1 || die "没有找到 curl"
@@ -46,6 +77,8 @@ printf '%s' "$PAGES_NAME" | grep -Eq '^[a-z0-9-]+$' || \
 [ "$PAGES_NAME" != "$WORKER_NAME" ] || \
   die "Pages 项目和 Worker 请使用不同名称"
 
+PAGES_URL="https://${PAGES_NAME}.pages.dev"
+
 say
 say "========== 准备 Wrangler =========="
 cd "$BASE_DIR"
@@ -76,73 +109,57 @@ EOF
 cd "$GATEWAY_DIR"
 say
 say "========== 创建或复用 Pages 项目 =========="
-PROJECTS_JSON="$("$WRANGLER" pages project list --json 2>/dev/null || printf '[]')"
-PROJECT_EXISTS="$(printf '%s' "$PROJECTS_JSON" | ROUTER_PAGES_NAME="$PAGES_NAME" node -e '
+PROJECT_EXISTS=no
+PROJECTS_JSON=''
+if retry_capture PROJECTS_JSON '读取 Pages 项目列表' "$WRANGLER" pages project list --json; then
+  PROJECT_EXISTS="$(printf '%s' "$PROJECTS_JSON" | ROUTER_PAGES_NAME="$PAGES_NAME" node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try {
     const j=JSON.parse(s); const a=Array.isArray(j)?j:
       (Array.isArray(j.result)?j.result:(Array.isArray(j.items)?j.items:[]));
     if(a.some(x=>x&&x.name===process.env.ROUTER_PAGES_NAME)) process.stdout.write("yes");
-  } catch (_) {}
-});' 2>/dev/null || true)"
+    else process.stdout.write("no");
+  } catch (_) { process.stdout.write("no"); }
+});' 2>/dev/null || printf 'no')"
+else
+  say '警告：Cloudflare API 暂时无法读取 Pages 项目列表，将通过稳定 Pages 地址确认是否为已存在项目。' >&2
+fi
+
+if [ "$PROJECT_EXISTS" != "yes" ] && health_ok "$PAGES_URL"; then
+  PROJECT_EXISTS=yes
+  say "项目列表 API 未确认，但稳定入口健康，确认同名 Pages 项目已存在：$PAGES_URL"
+fi
 
 if [ "$PROJECT_EXISTS" = "yes" ]; then
   say "检测到同名 Pages 项目，将复用并更新它的部署。"
 else
-  set +e
-  CREATE_OUTPUT="$("$WRANGLER" pages project create "$PAGES_NAME" \
-    --production-branch main 2>&1)"
-  CREATE_RC=$?
-  set -e
-
-  if [ "$CREATE_RC" -eq 0 ]; then
-    say "$CREATE_OUTPUT"
+  CREATE_OUTPUT=''
+  if retry_capture CREATE_OUTPUT '创建 Pages 项目' "$WRANGLER" pages project create "$PAGES_NAME" --production-branch main; then
+    [ -n "$CREATE_OUTPUT" ] && say "$CREATE_OUTPUT"
+    PROJECT_EXISTS=yes
   elif printf '%s' "$CREATE_OUTPUT" | grep -Eqi 'already exists|code:[[:space:]]*8000002'; then
     PROJECT_EXISTS=yes
     say "检测到同名 Pages 项目已存在，将直接复用并更新它的部署。"
   else
-    say "$CREATE_OUTPUT" >&2
-    die "创建 Pages 项目失败；不是可安全复用的同名项目错误"
+    [ -n "$CREATE_OUTPUT" ] && say "$CREATE_OUTPUT" >&2
+    die "连续 3 次无法确认或创建 Pages 项目；当前更像本机到 Cloudflare API 的网络故障，请恢复网络后重试"
   fi
 fi
 
 say
 say "========== 部署 Pages Function =========="
-DEPLOY_OUTPUT="$("$WRANGLER" pages deploy public \
-  --project-name "$PAGES_NAME" --branch main 2>&1)" || {
-    say "$DEPLOY_OUTPUT" >&2
-    die "Pages 部署失败；请确认 Worker 名称和 Cloudflare 账号一致"
-  }
-say "$DEPLOY_OUTPUT"
-
-PROJECTS_JSON="$("$WRANGLER" pages project list --json 2>/dev/null || printf '[]')"
-PAGES_TARGET="$(printf '%s' "$PROJECTS_JSON" | ROUTER_PAGES_NAME="$PAGES_NAME" node -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  try {
-    const j=JSON.parse(s); const a=Array.isArray(j)?j:
-      (Array.isArray(j.result)?j.result:(Array.isArray(j.items)?j.items:[]));
-    const x=a.find(v=>v&&v.name===process.env.ROUTER_PAGES_NAME);
-    if(!x) return;
-    const d=x.subdomain||(Array.isArray(x.domains)?x.domains.find(v=>String(v).endsWith(".pages.dev")):"");
-    if(d) process.stdout.write(String(d));
-  } catch (_) {}
-});' 2>/dev/null || true)"
-
-if [ -n "$PAGES_TARGET" ]; then
-  case "$PAGES_TARGET" in
-    http://*|https://*) PAGES_URL="${PAGES_TARGET%/}" ;;
-    *) PAGES_URL="https://${PAGES_TARGET%/}" ;;
-  esac
-else
-  PAGES_URL="https://${PAGES_NAME}.pages.dev"
+DEPLOY_OUTPUT=''
+if ! retry_capture DEPLOY_OUTPUT '部署 Pages Function' "$WRANGLER" pages deploy public --project-name "$PAGES_NAME" --branch main; then
+  [ -n "$DEPLOY_OUTPUT" ] && say "$DEPLOY_OUTPUT" >&2
+  die "Pages 部署连续 3 次失败；请检查本机到 Cloudflare API 的网络或代理"
 fi
+say "$DEPLOY_OUTPUT"
 
 say
 say "========== 从本机检查网关 =========="
 READY=0
 for ATTEMPT in 1 2 3; do
-  HEALTH="$(curl -fsS --noproxy '*' --connect-timeout 10 --max-time 25 "$PAGES_URL/health" 2>/dev/null || true)"
-  if printf '%s' "$HEALTH" | node -e 'let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.exit(j.ok&&j.capabilities?.command_check===true?0:1)}catch(_){process.exit(1)}})'; then READY=1; break; fi
+  if health_ok "$PAGES_URL"; then READY=1; break; fi
   sleep 5
 done
 [ "$READY" = 1 ] || die "Pages已发布，但入口验证未通过，整套云端部署未完成：$PAGES_URL"
