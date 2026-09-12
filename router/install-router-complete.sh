@@ -32,7 +32,23 @@ need() {
 need awk
 need grep
 need mktemp
-need sha256sum
+
+base_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+        return 0
+    fi
+    if [ -x /bin/busybox ] && /bin/busybox sha256sum "$1" >/dev/null 2>&1; then
+        /bin/busybox sha256sum "$1" | awk '{print $1}'
+        return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'
+        return 0
+    fi
+    echo '错误：缺少可用的 SHA256 校验工具；为避免执行未校验的 root 安装器而停止。' >&2
+    return 1
+}
 
 TMP_DIR="$(mktemp -d /tmp/node-suite-router-bootstrap.XXXXXX)"
 BASE_FILE="$TMP_DIR/base.sh"
@@ -83,7 +99,7 @@ fetch_base() {
 echo '========== 获取固定版本路由器安装器 =========='
 fetch_base
 [ -s "$BASE_FILE" ] || { echo '错误：固定版本基础脚本为空。' >&2; exit 1; }
-ACTUAL_SHA="$(sha256sum "$BASE_FILE" | awk '{print $1}')"
+ACTUAL_SHA="$(base_sha256 "$BASE_FILE")"
 [ "$ACTUAL_SHA" = "$BASE_SHA256" ] || {
     echo "错误：固定版本基础脚本 SHA256 不匹配：$ACTUAL_SHA" >&2
     exit 1
