@@ -147,9 +147,33 @@ done
 [ "$READY" = 1 ] || die "Pages已发布，但入口验证未通过，整套云端部署未完成：$PAGES_URL"
 say 'Pages入口能力检查通过。'
 
+say
+say "========== 写入 Pages 地址到 Worker =========="
 cd "$BASE_DIR"
-printf '%s' "$PAGES_URL" | "$WRANGLER" secret put PUBLIC_GATEWAY_URL >/dev/null || \
-  die 'Pages 已部署，但地址写入 Worker 失败'
+SECRET_OK=0
+SECRET_OUTPUT=''
+for ATTEMPT in 1 2 3; do
+  set +e
+  SECRET_OUTPUT="$(printf '%s' "$PAGES_URL" | "$WRANGLER" secret put PUBLIC_GATEWAY_URL 2>&1)"
+  SECRET_RC=$?
+  set -e
+  if [ "$SECRET_RC" -eq 0 ]; then
+    SECRET_OK=1
+    break
+  fi
+  say "第 ${ATTEMPT}/3 次写入失败，5 秒后重试："
+  say "$SECRET_OUTPUT"
+  [ "$ATTEMPT" -lt 3 ] && sleep 5
+done
+
+if [ "$SECRET_OK" -ne 1 ]; then
+  say "$SECRET_OUTPUT" >&2
+  say "Pages 已部署且入口验证通过，仅 Worker 的 PUBLIC_GATEWAY_URL 写入失败。" >&2
+  say "可稍后单独重试，不需要重新部署 Worker、D1、Webhook 或 Pages：" >&2
+  say "  cd '$BASE_DIR'" >&2
+  say "  printf '%s' '$PAGES_URL' | '$WRANGLER' secret put PUBLIC_GATEWAY_URL" >&2
+  exit 1
+fi
 say 'Pages 地址已写入 Telegram Bot 菜单。'
 
 say
