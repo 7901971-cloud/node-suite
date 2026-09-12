@@ -173,8 +173,8 @@ OUT='/tmp/install-router-complete.sh'
 
 rm -f "$OUT"
 (
-  curl -4 -fL --connect-timeout 15 --retry 3 "$RAW" -o "$OUT" || \
-  curl -fL --connect-timeout 15 --retry 3 \
+  curl -4 -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 "$RAW" -o "$OUT" || \
+  curl -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 \
     -H 'Accept: application/vnd.github.raw+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$API" -o "$OUT"
@@ -183,6 +183,8 @@ chmod 700 "$OUT" && \
 sh -n "$OUT" && \
 sh "$OUT"
 ```
+
+下载外层已设置单次总超时：GitHub Raw 如果建立连接后一直不返回数据，最长 45 秒就会失败并自动切换 GitHub Contents API，不会再无限卡在 `0 bytes`。路由器安装器 1.2 自己下载固定基础脚本时也有独立 `--max-time` 和多级回退。
 
 路由器安装器 1.2 会固定读取经过 SHA256 校验的 1.1 基础安装器，再做确定性补丁后执行。现有套件节点默认复用设备身份、端口和密钥；旧 sing-box/SS 节点不会在新 VLESS 验收前被自动删除。
 
@@ -213,8 +215,8 @@ OUT='/root/install-vless-reality-vps.sh'
 
 rm -f "$OUT"
 (
-  curl -4 -fL --connect-timeout 15 --retry 3 "$RAW" -o "$OUT" || \
-  curl -fL --connect-timeout 15 --retry 3 \
+  curl -4 -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 "$RAW" -o "$OUT" || \
+  curl -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 \
     -H 'Accept: application/vnd.github.raw+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$API" -o "$OUT"
@@ -223,6 +225,8 @@ chmod 700 "$OUT" && \
 bash -n "$OUT" && \
 bash "$OUT"
 ```
+
+VPS 外层下载同样有 45 秒总超时；Raw 卡住时会自动转 Contents API，不会无限等待。
 
 VPS 安装器 1.1.3 固定读取 `v1.1` 的完整基础安装器，在本机做确定性补丁后执行；基础脚本不会从可变 `main` 获取。
 
