@@ -8,7 +8,7 @@
 - VPS 安装器：`1.1.3`
 - Cloudflare / Telegram 控制中心：`3.7.0`
 
-当前固定代码提交：`aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
+当前固定代码提交：`982ad7d682bf4f756c23e37f2934eb9ebd5c9830`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
 
 ## 最新变化
 
@@ -82,6 +82,19 @@ Cloudflare 的 TCP 外部探测只代表 **Cloudflare 当前出口到节点公�
 
 Cloudflare 3.7.0 的上述 Telegram/UI/探测逻辑不需要重新安装路由器或 VPS，也不需要重新配对设备；重新部署 Cloudflare 后点击 **实时刷新** 即可使用新版逻辑。
 
+### Telegram Webhook 重部署保护
+
+Cloudflare 重部署时，Webhook Secret 现在由当前 Bot Token 稳定派生；使用同一个 Bot Token 重部署不会每次先随机轮换 Secret，避免 `setWebhook` 临时失败后出现“Worker 已换 Secret、Telegram 仍带旧 Secret”的失配状态。
+
+Webhook 设置流程同时增加：
+
+- `setWebhook` 最多重试 3 次。
+- 不再用 `curl -f` 吞掉 Telegram 的 400 响应正文；失败时会直接显示 Telegram 原始错误，方便定位。
+- Worker Webhook 设置失败时，如果同名 Pages 网关已经存在且 `/health` 正常，会自动尝试 `https://<Pages项目>.pages.dev/telegram/webhook`。
+- `setMyCommands` 失败会显示警告，但不会隐藏原始 Telegram 返回内容。
+
+如果一次部署停在 `curl: (56) ... 400`，直接使用本 README 的最新版部署命令重新运行即可；不需要重新安装路由器/VPS，也不需要重新配对已有设备。
+
 ## 1. 部署或复用 Cloudflare / Telegram
 
 在 Mac 终端执行：
@@ -89,7 +102,7 @@ Cloudflare 3.7.0 的上述 Telegram/UI/探测逻辑不需要重新安装路由�
 ```bash
 (
 set -eu
-REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
+REF='982ad7d682bf4f756c23e37f2934eb9ebd5c9830'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
@@ -108,7 +121,7 @@ bash cloudflare/deploy-complete.sh
 在 OpenWrt/Kwrt 的 SSH 终端执行：
 
 ```sh
-REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
+REF='982ad7d682bf4f756c23e37f2934eb9ebd5c9830'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -137,7 +150,7 @@ cd ~/Downloads
 rm -rf node-suite-1.2
 git clone https://github.com/sajik1/node-suite.git node-suite-1.2
 cd node-suite-1.2
-git checkout aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742
+git checkout 982ad7d682bf4f756c23e37f2934eb9ebd5c9830
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -148,7 +161,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu 和 systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
+REF='982ad7d682bf4f756c23e37f2934eb9ebd5c9830'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'

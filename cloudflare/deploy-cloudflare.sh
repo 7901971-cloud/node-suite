@@ -15,9 +15,6 @@ read_secret() {
   printf '\n' >&2
   printf '%s' "$value"
 }
-random_hex() {
-  openssl rand -hex "$1"
-}
 trap 'stty echo 2>/dev/null || true' EXIT INT TERM
 
 command -v node >/dev/null 2>&1 || die "请先安装 Node.js 22 或更高版本"
@@ -79,7 +76,7 @@ printf '%s' "$WORKER_NAME" | grep -Eq '^[a-z0-9-]+$' || die "Worker 名称只能
 printf 'D1 数据库名称 [router-node-center-db]：'
 IFS= read -r DB_INPUT
 DB_NAME="${DB_INPUT:-router-node-center-db}"
-printf '%s' "$DB_NAME" | grep -Eq '^[A-Za-z0-9_-]+$' || die "数据库名称格式不正确"
+printf '%s' "$DB_NAME" | grep -Eq '^[A-Za-z0-9_-]+$' || die "D1 数据库名称格式不正确"
 
 printf '每日汇报时区 [Asia/Shanghai]：'
 IFS= read -r TZ_INPUT
@@ -155,7 +152,12 @@ npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql
 npx wrangler d1 execute "$DB_NAME" --remote \
   --command="UPDATE bot_groups SET access_mode='members',role='viewer',updated_at=strftime('%s','now') WHERE access_mode='all' AND role<>'viewer';" >/dev/null
 
-WEBHOOK_SECRET="$(random_hex 24)"
+# Use a stable webhook secret derived from the Bot Token. Ordinary redeploys therefore
+# keep the same Telegram secret header instead of rotating the Worker first and risking
+# a broken webhook when Telegram's setWebhook call temporarily fails.
+WEBHOOK_SECRET="$(printf 'node-suite-webhook-v1:%s' "$BOT_TOKEN" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
+printf '%s' "$WEBHOOK_SECRET" | grep -Eq '^[a-f0-9]{64}$' || die '无法生成稳定的 Telegram Webhook Secret'
+
 SECRET_LIST="$(npx wrangler secret list --json 2>/dev/null || printf '[]')"
 HAS_DATA_KEY="$(printf '%s' "$SECRET_LIST" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);if(Array.isArray(a)&&a.some(x=>x?.name==="DATA_ENCRYPTION_KEY"))process.stdout.write("yes")}catch(_){}})')"
@@ -191,29 +193,67 @@ fi
 WORKER_URL="${WORKER_URL%/}"
 printf '%s' "$WORKER_URL" | grep -Eq '^https://[A-Za-z0-9._:-]+$' || die "Worker URL 格式不正确"
 
+HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${WORKER_URL}/health" 2>/dev/null || true)"
+if printf '%s' "$HEALTH" | grep -q '"ok":true'; then
+  say 'Worker 直连健康检查通过。'
+else
+  say '警告：Worker 直连健康检查暂未通过；仍会尝试 Telegram Webhook，并在失败时显示 Telegram 原始错误。' >&2
+fi
+
+set_telegram_webhook() {
+  local endpoint="$1"
+  local attempt result=''
+  for attempt in 1 2 3; do
+    result="$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
+      "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+      --data-urlencode "url=${endpoint}" \
+      --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
+      --data-urlencode 'allowed_updates=["message","edited_message","callback_query","chat_member","my_chat_member"]' \
+      --data 'drop_pending_updates=true' 2>&1 || true)"
+    if printf '%s' "$result" | grep -q '"ok":true'; then
+      say "Telegram Webhook 已设置：$endpoint"
+      return 0
+    fi
+    say "Telegram Webhook 第 ${attempt}/3 次失败：${result:-无响应}" >&2
+    [ "$attempt" -lt 3 ] && sleep 2
+  done
+  return 1
+}
+
 say
 say "========== 对接 Telegram Webhook =========="
-HOOK_RESULT="$(curl -fsS --connect-timeout 10 --max-time 30 -X POST \
-  "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-  --data-urlencode "url=${WORKER_URL}/telegram/webhook" \
-  --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
-  --data-urlencode 'allowed_updates=["message","edited_message","callback_query","chat_member","my_chat_member"]' \
-  --data 'drop_pending_updates=true')"
-printf '%s' "$HOOK_RESULT" | grep -q '"ok":true' || die "设置 Telegram Webhook 失败：$HOOK_RESULT"
+WEBHOOK_ENDPOINT="${WORKER_URL}/telegram/webhook"
+if ! set_telegram_webhook "$WEBHOOK_ENDPOINT"; then
+  PAGES_URL=''
+  if [ -n "${ROUTER_PAGES_NAME:-}" ] && printf '%s' "$ROUTER_PAGES_NAME" | grep -Eq '^[a-z0-9-]+$'; then
+    PAGES_URL="https://${ROUTER_PAGES_NAME}.pages.dev"
+  fi
+  if [ -n "$PAGES_URL" ]; then
+    PAGES_HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${PAGES_URL}/health" 2>/dev/null || true)"
+    if printf '%s' "$PAGES_HEALTH" | grep -q '"ok":true'; then
+      say "Worker Webhook 设置失败，检测到现有 Pages 网关可用，改用 Pages 入口重试。" >&2
+      WEBHOOK_ENDPOINT="${PAGES_URL}/telegram/webhook"
+      set_telegram_webhook "$WEBHOOK_ENDPOINT" || die 'Telegram Webhook 在 Worker 与 Pages 入口均设置失败；上方已保留 Telegram 原始错误。'
+    else
+      die 'Telegram Webhook 设置失败；现有 Pages 网关也未通过健康检查。上方已保留 Telegram 原始错误。'
+    fi
+  else
+    die 'Telegram Webhook 设置失败；上方已保留 Telegram 原始错误。'
+  fi
+fi
 
-COMMAND_RESULT="$(curl -fsS --connect-timeout 10 --max-time 30 -X POST \
+COMMAND_RESULT="$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
   "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -H 'Content-Type: application/json' \
-  --data '{"commands":[{"command":"start","description":"节点管理 / Bot 管理"},{"command":"routers","description":"节点管理"},{"command":"router","description":"路由器命令"},{"command":"vps","description":"VPS 命令"},{"command":"grouphelp","description":"管群命令"},{"command":"rules","description":"群规"},{"command":"id","description":"查看群和用户 ID"},{"command":"cancel","description":"取消当前输入"},{"command":"menu","description":"返回主菜单"}]}' || true)"
-
-HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${WORKER_URL}/health" || true)"
-if ! printf '%s' "$HEALTH" | grep -q '"ok":true'; then
-  say 'Worker直连健康检查未通过；继续部署Pages网关，由Pages入口进行最终检查。'
+  --data '{"commands":[{"command":"start","description":"节点管理 / Bot 管理"},{"command":"routers","description":"节点管理"},{"command":"router","description":"路由器命令"},{"command":"vps","description":"VPS 命令"},{"command":"grouphelp","description":"管群命令"},{"command":"rules","description":"群规"},{"command":"id","description":"查看群和用户 ID"},{"command":"cancel","description":"取消当前输入"},{"command":"menu","description":"返回主菜单"}]}' 2>&1 || true)"
+if ! printf '%s' "$COMMAND_RESULT" | grep -q '"ok":true'; then
+  say "警告：Telegram 命令菜单更新失败：${COMMAND_RESULT:-无响应}" >&2
 fi
 
 say
 say "部署完成"
 say "Worker 地址：$WORKER_URL"
+say "Telegram Webhook：$WEBHOOK_ENDPOINT"
 say "现在回到 Telegram，向 Bot 发送 /start。"
 say "依次点击：节点中心 → 添加设备，取得路由器配对码。"
 say "随后部署 Pages 网关，并在 OpenWrt 上运行 install-router-complete.sh。"
