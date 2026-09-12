@@ -7,7 +7,7 @@ set -Eeuo pipefail
 #   1) Quantumult X node name == Telegram device name during installation
 #   2) the accidental "vless:// 通用链接：" pseudo-node shown by Telegram
 #   3) raw.githubusercontent.com IPv6/path anomalies by preferring IPv4 and falling back to GitHub Contents API
-#   4) install-time REALITY SNI/target auto-selection from 10 built-in domains by strict TLS compatibility + lowest handshake latency
+#   4) install-time REALITY SNI/target auto-selection from 12 built-in domains by strict TLS compatibility + lowest handshake latency
 
 export LC_ALL=C
 umask 077
@@ -99,10 +99,10 @@ awk '
 function emit_auto_selector() {
   print "auto_select_reality_target() {"
   print "  local candidates host log start_ms end_ms ms best_host=\"\" best_ms=\"\" idx=0"
-  print "  candidates=\"www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.baidu.com www.qq.com www.10086.cn www.10010.com www.189.cn\""
+  print "  candidates=\"www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.douyin.com www.qq.com www.10086.cn www.10010.com www.189.cn www.bing.com www.tiktok.com\""
   print "  say"
   print "  say \"========== 3A. 自动选择 REALITY SNI / 目标 ==========\""
-  print "  say \"将测试 10 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前机器 TLS 握手延迟最低者。\""
+  print "  say \"将测试 12 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前机器 TLS 握手延迟最低者。\""
   print "  for host in $candidates; do"
   print "    idx=$((idx + 1))"
   print "    log=\"$STAGE/reality-auto-$idx.log\""
@@ -117,7 +117,7 @@ function emit_auto_selector() {
   print "      printf \047  - %-22s 跳过（TLS 1.3 / h2 / 证书 / 连通性未全部通过）\\n\047 \"${host}:443\""
   print "    fi"
   print "  done"
-  print "  [[ -n \"$best_host\" ]] || die \04710 个内置 REALITY 目标均未通过严格检查；未写业务配置\047"
+  print "  [[ -n \"$best_host\" ]] || die \04712 个内置 REALITY 目标均未通过严格检查；未写业务配置\047"
   print "  REALITY_SNI=\"$best_host\""
   print "  REALITY_DEST=\"${best_host}:443\""
   print "  say \"自动选择：SNI=${REALITY_SNI}；目标=${REALITY_DEST}；TLS 握手约 ${best_ms} ms\""
@@ -188,6 +188,22 @@ grep -Fq 'www.10086.cn www.10010.com www.189.cn' "$PATCHED_FILE" || {
   echo '错误：三大运营商候选域名未注入。' >&2
   exit 1
 }
+grep -Fq 'www.douyin.com' "$PATCHED_FILE" || {
+  echo '错误：抖音候选域名未注入。' >&2
+  exit 1
+}
+grep -Fq 'www.bing.com' "$PATCHED_FILE" || {
+  echo '错误：Bing 候选域名未注入。' >&2
+  exit 1
+}
+grep -Fq 'www.tiktok.com' "$PATCHED_FILE" || {
+  echo '错误：TikTok 候选域名未注入。' >&2
+  exit 1
+}
+if grep -Fq 'www.baidu.com' "$PATCHED_FILE"; then
+  echo '错误：旧百度候选域名仍存在。' >&2
+  exit 1
+fi
 [[ "$(grep -Fc '  auto_select_reality_target' "$PATCHED_FILE")" -eq 1 ]] || {
   echo '错误：REALITY 自动选择调用数量异常。' >&2
   exit 1
