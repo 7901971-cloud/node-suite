@@ -70,7 +70,18 @@
 
 ## 部署与验证
 
-这次只更新 Cloudflare：运行仓库 `cloudflare/deploy-complete.sh`，填写原 Worker、D1、Pages 名称，复用原数据。部署会创建新增表、更新 Webhook 的编辑消息和成员事件订阅、将维护任务改为每分钟。设备心跳/DDNS 的 5 分钟周期不变，不需要重装路由器或 VPS。
+升级 Cloudflare/TG 控制中心时运行仓库 `cloudflare/deploy-complete.sh`，并继续使用原 Worker、D1、Pages 项目名称和原 Bot Token。脚本会复用现有 D1、设备、权限和数据加密密钥。
+
+重复部署时注意：
+
+- **已有路由器/VPS 不需要重新配对。** 原设备 ID、节点记录和权限继续保留。
+- 只有首次新增一台设备时，才从「节点管理 → 添加设备」获取新的配对码。
+- Cloudflare API 出现瞬时 `fetch failed` 时，Worker/D1/Pages 的关键管理请求会自动重试；如果最终仍停止，恢复网络后重跑同一固定提交和同一名称，不要临时改项目名或新建 D1。
+- Worker Secret 列表无法确认时，部署会在写入任何 Secret 前停止，避免误覆盖现有 `DATA_ENCRYPTION_KEY`。
+- Pages `/health` 正常但 `PUBLIC_GATEWAY_URL` 写入失败时，若复用的是原 Pages 项目，会保留 Worker 中旧的稳定 Pages 地址，不要求重新配对。
+- 部署完成后 `/health` 应返回 `"ok":true` 且版本为 `3.7.0`。
+
+设备心跳/DDNS 的 5 分钟周期不变，不需要因为 Cloudflare/TG 升级而重装路由器或 VPS。
 
 机器人必须在群中具有相应 Telegram 权限。可从「群设置 → 权限检查」确认；启用自动规则前也会检查权限。权限检查成功不代表所有真实群事件已完成验证，部署后请分别用普通成员、Telegram 管理员和匿名管理员消息测试屏蔽词场景。
 
