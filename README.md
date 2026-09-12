@@ -8,7 +8,7 @@
 - VPS 安装器：`1.1.3`
 - Cloudflare / Telegram 控制中心：`3.7.0`
 
-当前固定代码提交：`eb612142c6c78bc088e0c45178e1427d6a4716fe`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
+当前固定代码提交：`db0ec12b2eeea39c1c961d719f4ce3d7968a0172`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
 
 > `npm ci` 日志里的包名仍可能显示 `node-center-cloudflare-tgbot@3.6.0`，这是基础包元数据；安装时 `apply-index-patch.mjs` 会应用 3.7 运行时补丁，最终以 `/health` 返回的 `version":"3.7.0"` 为实际控制中心版本。
 
@@ -147,7 +147,7 @@ Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pa
 ```bash
 (
 set -eu
-REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
+REF='db0ec12b2eeea39c1c961d719f4ce3d7968a0172'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
@@ -166,7 +166,7 @@ bash cloudflare/deploy-complete.sh
 在 OpenWrt/Kwrt 的 SSH 终端执行：
 
 ```sh
-REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
+REF='db0ec12b2eeea39c1c961d719f4ce3d7968a0172'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -184,7 +184,7 @@ sh -n "$OUT" && \
 sh "$OUT"
 ```
 
-下载外层已设置单次总超时：GitHub Raw 如果建立连接后一直不返回数据，最长 45 秒就会失败并自动切换 GitHub Contents API，不会再无限卡在 `0 bytes`。路由器安装器 1.2 自己下载固定基础脚本时也有独立 `--max-time` 和多级回退。
+下载外层已设置单次总超时：GitHub Raw 如果建立连接后一直不返回数据，最长 45 秒就会失败并自动切换 GitHub Contents API，不会再无限卡在 `0 bytes`。路由器安装器 1.2 自己下载固定基础脚本时，Raw 最长等待 30 秒后立即切换 Contents API；API 也有 45 秒总超时和重试，之后才会尝试 `uclient-fetch` / `wget`。因此外层和内层都不会再因为 Raw 已连接但 0 bytes 而长时间挂死。
 
 路由器安装器 1.2 会固定读取经过 SHA256 校验的 1.1 基础安装器，再做确定性补丁后执行。现有套件节点默认复用设备身份、端口和密钥；旧 sing-box/SS 节点不会在新 VLESS 验收前被自动删除。
 
@@ -197,7 +197,7 @@ cd ~/Downloads
 rm -rf node-suite-1.2
 git clone https://github.com/sajik1/node-suite.git node-suite-1.2
 cd node-suite-1.2
-git checkout eb612142c6c78bc088e0c45178e1427d6a4716fe
+git checkout db0ec12b2eeea39c1c961d719f4ce3d7968a0172
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -208,7 +208,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu 和 systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
+REF='db0ec12b2eeea39c1c961d719f4ce3d7968a0172'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'
