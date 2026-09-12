@@ -98,6 +98,7 @@ else
   if [ "$CREATE_RC" -eq 0 ]; then
     say "$CREATE_OUTPUT"
   elif printf '%s' "$CREATE_OUTPUT" | grep -Eqi 'already exists|code:[[:space:]]*8000002'; then
+    PROJECT_EXISTS=yes
     say "检测到同名 Pages 项目已存在，将直接复用并更新它的部署。"
   else
     say "$CREATE_OUTPUT" >&2
@@ -148,9 +149,27 @@ done
 say 'Pages入口能力检查通过。'
 
 cd "$BASE_DIR"
-printf '%s' "$PAGES_URL" | "$WRANGLER" secret put PUBLIC_GATEWAY_URL >/dev/null || \
-  die 'Pages 已部署，但地址写入 Worker 失败'
-say 'Pages 地址已写入 Telegram Bot 菜单。'
+say
+say "========== 写入 Pages 地址到 Worker =========="
+SECRET_OK=0
+for ATTEMPT in 1 2 3; do
+  if printf '%s' "$PAGES_URL" | "$WRANGLER" secret put PUBLIC_GATEWAY_URL >/dev/null 2>&1; then
+    SECRET_OK=1
+    break
+  fi
+  say "Pages 地址写入 Worker 第 ${ATTEMPT}/3 次失败，等待后重试。" >&2
+  sleep $((ATTEMPT * 3))
+done
+
+if [ "$SECRET_OK" = 1 ]; then
+  say 'Pages 地址已写入 Telegram Bot 菜单。'
+elif [ "$PROJECT_EXISTS" = "yes" ]; then
+  say '警告：Pages 已部署且复用的是原项目，但本机到 Cloudflare API 的写 Secret 请求连续失败。' >&2
+  say '由于同名 Pages 项目的稳定地址未变化，保留 Worker 中现有 PUBLIC_GATEWAY_URL；本次不把临时 API 网络故障判定为整套部署失败。' >&2
+  say "当前 Pages 入口：$PAGES_URL" >&2
+else
+  die 'Pages 已部署，但新项目地址连续 3 次无法写入 Worker；请恢复 Cloudflare API 网络后重试'
+fi
 
 say
 say "Pages 监控入口：$PAGES_URL"
