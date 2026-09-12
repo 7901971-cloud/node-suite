@@ -3,19 +3,18 @@ set -eu
 umask 077
 export LC_ALL=C
 
-# Node Suite router installer bootstrap 1.2
-# The full 1.1 router installer is pinned to an immutable commit and patched
-# deterministically before execution. The packaged suite carries the base file
-# locally; standalone use falls back to GitHub only when that sibling is absent.
-# 1.2: install-time REALITY SNI/target auto-selection from 12 built-in domains
-#      by strict TLS 1.3 + h2 + certificate checks and 3-sample median latency.
+# Node Suite router installer 1.2
+# Current repository keeps only this user-facing router installer.
+# It fetches the verified immutable base internally, applies the current deterministic
+# patch, validates the result, then executes it.
+# REALITY SNI/target is selected from 12 built-in domains by strict TLS 1.3 + h2 +
+# certificate checks and 3-sample median handshake latency.
 
 SCRIPT_VERSION='1.2'
 BASE_COMMIT='766e13d9f7a0e17c3616538882b707a5468633f4'
 BASE_SHA256='12dae0a29d5e21be2c66162afa2f4c199dcea3d4ef53acd8fde00d0438f21789'
 REPO='sajik1/node-suite'
 BASE_PATH='router/install-router-complete.sh'
-LOCAL_BASE_NAME='install-router-base.sh'
 
 case "${1:-}" in
     --version) echo "$SCRIPT_VERSION"; exit 0 ;;
@@ -63,19 +62,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-SELF_DIR="$(dirname "$0")"
-LOCAL_BASE="$SELF_DIR/$LOCAL_BASE_NAME"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BASE_COMMIT}/${BASE_PATH}"
 API_URL="https://api.github.com/repos/${REPO}/contents/${BASE_PATH}?ref=${BASE_COMMIT}"
 
 fetch_base() {
-    if [ -s "$LOCAL_BASE" ]; then
-        cp "$LOCAL_BASE" "$BASE_FILE"
-        echo '使用安装包内固定基础脚本。'
-        return 0
-    fi
-
-    echo '安装包内未找到基础脚本，尝试从 GitHub 固定提交获取。'
+    echo '获取并校验内部固定基础脚本。'
     if command -v curl >/dev/null 2>&1; then
         if curl -4 -fL --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 \
             "$RAW_URL" -o "$BASE_FILE"; then
@@ -99,11 +90,11 @@ fetch_base() {
         wget -T 45 -O "$BASE_FILE" "$RAW_URL" && return 0
         rm -f "$BASE_FILE"
     fi
-    echo '错误：无法获取固定基础脚本；请使用完整安装包（含 install-router-base.sh）或确保 curl/uclient-fetch/wget 可用。' >&2
+    echo '错误：无法获取固定基础脚本；请确认设备可访问 GitHub Raw 或 Contents API。' >&2
     return 1
 }
 
-echo '========== 获取固定版本路由器安装器 =========='
+echo '========== 准备当前路由器安装器 =========='
 fetch_base
 [ -s "$BASE_FILE" ] || { echo '错误：固定基础脚本为空。' >&2; exit 1; }
 ACTUAL_SHA="$(base_sha256 "$BASE_FILE")"
@@ -245,5 +236,5 @@ sh -n "$PATCHED_FILE" || {
     exit 1
 }
 
-echo '补丁校验通过，开始运行路由器安装器 1.2。'
+echo '校验通过，开始运行当前路由器安装器 1.2。'
 sh "$PATCHED_FILE" "$@"
