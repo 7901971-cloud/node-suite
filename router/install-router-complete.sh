@@ -77,20 +77,29 @@ fetch_base() {
 
     echo '安装包内未找到基础脚本，尝试从 GitHub 固定提交获取。'
     if command -v curl >/dev/null 2>&1; then
-        if curl -4 -fL --connect-timeout 15 --max-time 120 --retry 3 "$RAW_URL" -o "$BASE_FILE"; then
+        # Raw 在部分家宽上可能已经建立 TCP/TLS 但长期 0 bytes；
+        # 给 Raw 较短的总传输上限，尽快切换 Contents API，而不是卡数分钟。
+        if curl -4 -fL --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 \
+            "$RAW_URL" -o "$BASE_FILE"; then
             return 0
         fi
-        echo 'GitHub Raw 下载失败，自动切换 GitHub Contents API。' >&2
-        curl -fL --connect-timeout 15 --max-time 120 --retry 3 \
+        echo 'GitHub Raw 下载失败或超时，自动切换 GitHub Contents API。' >&2
+        rm -f "$BASE_FILE"
+        if curl -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 \
             -H 'Accept: application/vnd.github.raw+json' \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "$API_URL" -o "$BASE_FILE" && return 0
+            "$API_URL" -o "$BASE_FILE"; then
+            return 0
+        fi
+        rm -f "$BASE_FILE"
     fi
     if command -v uclient-fetch >/dev/null 2>&1; then
-        uclient-fetch -T 120 -O "$BASE_FILE" "$RAW_URL" && return 0
+        uclient-fetch -T 45 -O "$BASE_FILE" "$RAW_URL" && return 0
+        rm -f "$BASE_FILE"
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -T 120 -O "$BASE_FILE" "$RAW_URL" && return 0
+        wget -T 45 -O "$BASE_FILE" "$RAW_URL" && return 0
+        rm -f "$BASE_FILE"
     fi
     echo '错误：无法获取固定版本基础脚本；请使用完整安装包（含 install-router-complete-base-v1.1.sh）或确保 curl/uclient-fetch/wget 可用。' >&2
     return 1
