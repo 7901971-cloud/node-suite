@@ -15,6 +15,37 @@ read_secret() {
   printf '\n' >&2
   printf '%s' "$value"
 }
+retry_capture() {
+  local __outvar="$1" label="$2"
+  shift 2
+  local attempt output rc
+  output=''
+  for attempt in 1 2 3; do
+    set +e
+    output="$("$@" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      printf -v "$__outvar" '%s' "$output"
+      return 0
+    fi
+    say "$label 第 ${attempt}/3 次失败，等待后重试。" >&2
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  printf -v "$__outvar" '%s' "$output"
+  return 1
+}
+put_secret() {
+  local name="$1" value="$2" attempt
+  for attempt in 1 2 3; do
+    if printf '%s' "$value" | npx wrangler secret put "$name" >/dev/null 2>&1; then
+      return 0
+    fi
+    say "写入 Secret ${name} 第 ${attempt}/3 次失败，等待后重试。" >&2
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  return 1
+}
 trap 'stty echo 2>/dev/null || true' EXIT INT TERM
 
 command -v node >/dev/null 2>&1 || die "请先安装 Node.js 22 或更高版本"
@@ -29,7 +60,8 @@ say "========== Cloudflare + Telegram 路由节点中心 =========="
 say "Bot Token 只会写入 Cloudflare Secret，不会保存到本地配置文件。"
 BOT_TOKEN="$(read_secret 'Telegram Bot Token：')"
 printf '%s' "$BOT_TOKEN" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$' || die "Bot Token 格式不正确"
-BOT_USERNAME="$(curl -fsS --connect-timeout 10 --max-time 20 "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | node -e '
+BOT_USERNAME="$(curl -fsS --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 30 \
+  "https://api.telegram.org/bot${BOT_TOKEN}/getMe" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(j.ok&&j.result?.username)process.stdout.write(String(j.result.username))}catch(_){}})')"
 printf '%s' "$BOT_USERNAME" | grep -Eq '^[A-Za-z0-9_]{5,32}$' || die '无法取得 Telegram Bot 用户名'
 
@@ -38,7 +70,7 @@ say "请先在 Telegram 中打开刚创建的 Bot，发送一次 /start。"
 printf '发送完成后按回车继续：'
 IFS= read -r _
 
-UPDATES_JSON="$(curl -fsS --connect-timeout 10 --max-time 20 \
+UPDATES_JSON="$(curl -fsS --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 30 \
   "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" 2>/dev/null || true)"
 
 DETECTED_OWNER="$(printf '%s' "$UPDATES_JSON" | node -e '
@@ -93,14 +125,28 @@ say
 say "========== 安装 Wrangler =========="
 npm ci --no-audit --no-fund
 
-if ! npx wrangler whoami >/dev/null 2>&1; then
-  say "即将打开浏览器登录 Cloudflare。"
-  npx wrangler login
+WHOAMI_OUTPUT=''
+if ! retry_capture WHOAMI_OUTPUT '检查 Cloudflare 登录状态' npx wrangler whoami; then
+  if printf '%s' "$WHOAMI_OUTPUT" | grep -Eqi 'not authenticated|not logged|login|authentication'; then
+    say "Cloudflare 登录已失效，即将打开浏览器重新登录。"
+    npx wrangler login
+    retry_capture WHOAMI_OUTPUT '重新确认 Cloudflare 登录状态' npx wrangler whoami || {
+      [ -n "$WHOAMI_OUTPUT" ] && say "$WHOAMI_OUTPUT" >&2
+      die '重新登录后仍无法确认 Cloudflare 状态'
+    }
+  else
+    [ -n "$WHOAMI_OUTPUT" ] && say "$WHOAMI_OUTPUT" >&2
+    die 'Cloudflare 登录状态连续 3 次无法确认，更像本机到 Cloudflare API 的网络/代理故障；为避免无意义重复 OAuth，本次停止，请恢复网络后重跑同一命令'
+  fi
 fi
 
 say
 say "========== 创建或复用 D1 =========="
-DB_LIST="$(npx wrangler d1 list --json 2>/dev/null || printf '[]')"
+DB_LIST=''
+if ! retry_capture DB_LIST '读取 D1 列表' npx wrangler d1 list --json; then
+  [ -n "$DB_LIST" ] && say "$DB_LIST" >&2
+  die '连续 3 次无法读取 D1 列表；为避免把临时 API 故障误判成“数据库不存在”，本次停止，不创建新 D1'
+fi
 DB_ID="$(printf '%s' "$DB_LIST" | ROUTER_DB_NAME="$DB_NAME" node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try { const a=JSON.parse(s); const n=process.env.ROUTER_DB_NAME;
@@ -110,10 +156,11 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 });' 2>/dev/null || true)"
 
 if [ -z "$DB_ID" ]; then
-  CREATE_OUTPUT="$(npx wrangler d1 create "$DB_NAME" 2>&1)" || {
-    say "$CREATE_OUTPUT" >&2
-    die "创建 D1 数据库失败"
-  }
+  CREATE_OUTPUT=''
+  if ! retry_capture CREATE_OUTPUT '创建 D1 数据库' npx wrangler d1 create "$DB_NAME"; then
+    [ -n "$CREATE_OUTPUT" ] && say "$CREATE_OUTPUT" >&2
+    die "创建 D1 数据库连续 3 次失败"
+  fi
   DB_ID="$(printf '%s\n' "$CREATE_OUTPUT" | sed -n \
     -e 's/.*database_id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
     -e 's/.*"database_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -n 1)"
@@ -148,9 +195,18 @@ EOF
 
 say
 say "========== 初始化数据库 =========="
-npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql
-npx wrangler d1 execute "$DB_NAME" --remote \
-  --command="UPDATE bot_groups SET access_mode='members',role='viewer',updated_at=strftime('%s','now') WHERE access_mode='all' AND role<>'viewer';" >/dev/null
+D1_INIT_OUTPUT=''
+if ! retry_capture D1_INIT_OUTPUT '初始化 D1 数据库' npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql; then
+  [ -n "$D1_INIT_OUTPUT" ] && say "$D1_INIT_OUTPUT" >&2
+  die 'D1 初始化连续 3 次失败'
+fi
+[ -n "$D1_INIT_OUTPUT" ] && say "$D1_INIT_OUTPUT"
+D1_MIGRATE_OUTPUT=''
+if ! retry_capture D1_MIGRATE_OUTPUT '更新 D1 兼容数据' npx wrangler d1 execute "$DB_NAME" --remote \
+  --command="UPDATE bot_groups SET access_mode='members',role='viewer',updated_at=strftime('%s','now') WHERE access_mode='all' AND role<>'viewer';"; then
+  [ -n "$D1_MIGRATE_OUTPUT" ] && say "$D1_MIGRATE_OUTPUT" >&2
+  die 'D1 兼容数据更新连续 3 次失败'
+fi
 
 # Use a stable webhook secret derived from the Bot Token. Ordinary redeploys therefore
 # keep the same Telegram secret header instead of rotating the Worker first and risking
@@ -158,7 +214,16 @@ npx wrangler d1 execute "$DB_NAME" --remote \
 WEBHOOK_SECRET="$(printf 'node-suite-webhook-v1:%s' "$BOT_TOKEN" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
 printf '%s' "$WEBHOOK_SECRET" | grep -Eq '^[a-f0-9]{64}$' || die '无法生成稳定的 Telegram Webhook Secret'
 
-SECRET_LIST="$(npx wrangler secret list --json 2>/dev/null || printf '[]')"
+SECRET_LIST=''
+if ! retry_capture SECRET_LIST '读取 Worker Secret 列表' npx wrangler secret list --json; then
+  if printf '%s' "$SECRET_LIST" | grep -Eqi 'worker.*not.*found|script.*not.*found|does not exist|10007'; then
+    SECRET_LIST='[]'
+    say '尚未发现已部署 Worker，将按首次部署生成数据加密密钥。'
+  else
+    [ -n "$SECRET_LIST" ] && say "$SECRET_LIST" >&2
+    die '连续 3 次无法读取 Worker Secret 列表；为避免误覆盖现有 DATA_ENCRYPTION_KEY，本次在写入任何 Secret 前停止'
+  fi
+fi
 HAS_DATA_KEY="$(printf '%s' "$SECRET_LIST" | node -e '
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);if(Array.isArray(a)&&a.some(x=>x?.name==="DATA_ENCRYPTION_KEY"))process.stdout.write("yes")}catch(_){}})')"
 DATA_KEY=''
@@ -168,22 +233,23 @@ fi
 
 say
 say "========== 写入 Cloudflare Secrets =========="
-printf '%s' "$BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN >/dev/null
-printf '%s' "$WEBHOOK_SECRET" | npx wrangler secret put TELEGRAM_WEBHOOK_SECRET >/dev/null
-printf '%s' "$OWNER_IDS" | npx wrangler secret put OWNER_TELEGRAM_IDS >/dev/null
-printf '%s' "$BOT_USERNAME" | npx wrangler secret put TELEGRAM_BOT_USERNAME >/dev/null
+put_secret TELEGRAM_BOT_TOKEN "$BOT_TOKEN" || die 'TELEGRAM_BOT_TOKEN 连续 3 次写入失败'
+put_secret TELEGRAM_WEBHOOK_SECRET "$WEBHOOK_SECRET" || die 'TELEGRAM_WEBHOOK_SECRET 连续 3 次写入失败'
+put_secret OWNER_TELEGRAM_IDS "$OWNER_IDS" || die 'OWNER_TELEGRAM_IDS 连续 3 次写入失败'
+put_secret TELEGRAM_BOT_USERNAME "$BOT_USERNAME" || die 'TELEGRAM_BOT_USERNAME 连续 3 次写入失败'
 if [ -n "$DATA_KEY" ]; then
-  printf '%s' "$DATA_KEY" | npx wrangler secret put DATA_ENCRYPTION_KEY >/dev/null
+  put_secret DATA_ENCRYPTION_KEY "$DATA_KEY" || die 'DATA_ENCRYPTION_KEY 连续 3 次写入失败'
 else
   say '检测到现有数据加密密钥，已保留以继续读取原节点信息。'
 fi
 
 say
 say "========== 部署 Worker =========="
-DEPLOY_OUTPUT="$(npx wrangler deploy 2>&1)" || {
-  say "$DEPLOY_OUTPUT" >&2
-  die "Worker 部署失败"
-}
+DEPLOY_OUTPUT=''
+if ! retry_capture DEPLOY_OUTPUT '部署 Worker' npx wrangler deploy; then
+  [ -n "$DEPLOY_OUTPUT" ] && say "$DEPLOY_OUTPUT" >&2
+  die "Worker 部署连续 3 次失败"
+fi
 say "$DEPLOY_OUTPUT"
 WORKER_URL="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -Eo 'https://[A-Za-z0-9.-]+\.workers\.dev' | tail -n 1 || true)"
 if [ -z "$WORKER_URL" ]; then
@@ -193,7 +259,12 @@ fi
 WORKER_URL="${WORKER_URL%/}"
 printf '%s' "$WORKER_URL" | grep -Eq '^https://[A-Za-z0-9._:-]+$' || die "Worker URL 格式不正确"
 
-HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${WORKER_URL}/health" 2>/dev/null || true)"
+HEALTH=''
+for ATTEMPT in 1 2 3; do
+  HEALTH="$(curl -fsS --connect-timeout 10 --max-time 20 "${WORKER_URL}/health" 2>/dev/null || true)"
+  printf '%s' "$HEALTH" | grep -q '"ok":true' && break
+  [ "$ATTEMPT" -lt 3 ] && sleep 3
+done
 if printf '%s' "$HEALTH" | grep -q '"ok":true'; then
   say 'Worker 直连健康检查通过。'
 else
@@ -242,10 +313,15 @@ if ! set_telegram_webhook "$WEBHOOK_ENDPOINT"; then
   fi
 fi
 
-COMMAND_RESULT="$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
-  "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
-  -H 'Content-Type: application/json' \
-  --data '{"commands":[{"command":"start","description":"节点管理 / Bot 管理"},{"command":"routers","description":"节点管理"},{"command":"router","description":"路由器命令"},{"command":"vps","description":"VPS 命令"},{"command":"grouphelp","description":"管群命令"},{"command":"rules","description":"群规"},{"command":"id","description":"查看群和用户 ID"},{"command":"cancel","description":"取消当前输入"},{"command":"menu","description":"返回主菜单"}]}' 2>&1 || true)"
+COMMAND_RESULT=''
+for ATTEMPT in 1 2 3; do
+  COMMAND_RESULT="$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
+    "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
+    -H 'Content-Type: application/json' \
+    --data '{"commands":[{"command":"start","description":"节点管理 / Bot 管理"},{"command":"routers","description":"节点管理"},{"command":"router","description":"路由器命令"},{"command":"vps","description":"VPS 命令"},{"command":"grouphelp","description":"管群命令"},{"command":"rules","description":"群规"},{"command":"id","description":"查看群和用户 ID"},{"command":"cancel","description":"取消当前输入"},{"command":"menu","description":"返回主菜单"}]}' 2>&1 || true)"
+  printf '%s' "$COMMAND_RESULT" | grep -q '"ok":true' && break
+  [ "$ATTEMPT" -lt 3 ] && sleep 2
+done
 if ! printf '%s' "$COMMAND_RESULT" | grep -q '"ok":true'; then
   say "警告：Telegram 命令菜单更新失败：${COMMAND_RESULT:-无响应}" >&2
 fi
@@ -254,6 +330,6 @@ say
 say "部署完成"
 say "Worker 地址：$WORKER_URL"
 say "Telegram Webhook：$WEBHOOK_ENDPOINT"
-say "现在回到 Telegram，向 Bot 发送 /start。"
-say "依次点击：节点中心 → 添加设备，取得路由器配对码。"
-say "随后部署 Pages 网关，并在 OpenWrt 上运行 install-router-complete.sh。"
+say "首次部署：回到 Telegram 发送 /start，再从 节点管理 → 添加设备 获取配对码。"
+say "已有部署重跑：原设备、权限和配对关系保留，不需要重新配对。"
+say "随后 deploy-complete.sh 会继续部署/复用 Pages 网关。"
