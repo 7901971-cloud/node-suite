@@ -7,7 +7,7 @@ export LC_ALL=C
 # The full 1.1 router installer is pinned to an immutable commit and patched
 # deterministically before execution. The packaged suite carries the base file
 # locally; standalone use falls back to GitHub only when that sibling is absent.
-# 1.2: install-time REALITY SNI/target auto-selection from 10 built-in domains
+# 1.2: install-time REALITY SNI/target auto-selection from 12 built-in domains
 #      by strict TLS 1.3 + h2 + certificate checks and lowest handshake latency.
 
 SCRIPT_VERSION='1.2'
@@ -134,10 +134,10 @@ grep -Fq "printf '应用保守 TCP 优化" "$BASE_FILE" || {
 awk '
 function emit_selector_body() {
     print "    local candidates host log start_ms end_ms ms best_host=\047\047 best_ms=\047\047 idx=0"
-    print "    candidates=\047www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.baidu.com www.qq.com www.10086.cn www.10010.com www.189.cn\047"
+    print "    candidates=\047www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.douyin.com www.qq.com www.10086.cn www.10010.com www.189.cn www.bing.com www.tiktok.com\047"
     print "    say"
     print "    say \047========== 6A. 自动选择 REALITY SNI / 目标 ==========\047"
-    print "    say \047将测试 10 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前路由器 TLS 握手延迟最低者。\047"
+    print "    say \047将测试 12 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前路由器 TLS 握手延迟最低者。\047"
     print "    for host in $candidates; do"
     print "        idx=$((idx + 1))"
     print "        log=\"$STAGE/reality-auto-$idx.log\""
@@ -158,7 +158,7 @@ function emit_selector_body() {
     print "            printf \047  - %-22s 跳过（TLS 1.3 / h2 / 证书 / 连通性未全部通过）\\n\047 \"$host:443\""
     print "        fi"
     print "    done"
-    print "    [ -n \"$best_host\" ] || die \04710 个内置 REALITY 目标均未通过严格检查；尚未写业务配置\047"
+    print "    [ -n \"$best_host\" ] || die \04712 个内置 REALITY 目标均未通过严格检查；尚未写业务配置\047"
     print "    REALITY_SNI=\"$best_host\""
     print "    REALITY_DEST=\"$best_host:443\""
     print "    say \"自动选择：SNI=$REALITY_SNI；目标=$REALITY_DEST；TLS 握手约 ${best_ms} ms\""
@@ -195,6 +195,22 @@ grep -Fq 'www.10086.cn www.10010.com www.189.cn' "$PATCHED_FILE" || {
     echo '错误：三大运营商候选域名未注入。' >&2
     exit 1
 }
+grep -Fq 'www.douyin.com' "$PATCHED_FILE" || {
+    echo '错误：抖音候选域名未注入。' >&2
+    exit 1
+}
+grep -Fq 'www.bing.com' "$PATCHED_FILE" || {
+    echo '错误：Bing 候选域名未注入。' >&2
+    exit 1
+}
+grep -Fq 'www.tiktok.com' "$PATCHED_FILE" || {
+    echo '错误：TikTok 候选域名未注入。' >&2
+    exit 1
+}
+if grep -Fq 'www.baidu.com' "$PATCHED_FILE"; then
+    echo '错误：旧百度候选域名仍存在。' >&2
+    exit 1
+fi
 grep -Fq '自动选择：SNI=$REALITY_SNI；目标=$REALITY_DEST' "$PATCHED_FILE" || {
     echo '错误：REALITY 自动选择逻辑未注入。' >&2
     exit 1
