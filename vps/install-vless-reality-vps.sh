@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Node Suite VPS installer bootstrap 1.1.2
+# Node Suite VPS installer bootstrap 1.1.3
 # The full 1.1 installer is pinned by tag and patched deterministically before execution.
 # This keeps the released base immutable while fixing:
 #   1) Quantumult X node name == Telegram device name during installation
 #   2) the accidental "vless:// 通用链接：" pseudo-node shown by Telegram
 #   3) raw.githubusercontent.com IPv6/path anomalies by preferring IPv4 and falling back to GitHub Contents API
+#   4) install-time REALITY SNI/target auto-selection from 10 built-in domains by strict TLS compatibility + lowest handshake latency
 
 export LC_ALL=C
 umask 077
 
-readonly SCRIPT_VERSION='1.1.2'
+readonly SCRIPT_VERSION='1.1.3'
 readonly BASE_REF='v1.1'
 readonly REPO='sajik1/node-suite'
 readonly BASE_PATH='vps/install-vless-reality-vps.sh'
@@ -89,12 +90,44 @@ grep -Fq 'vless:// 通用链接：' "$BASE_FILE" || {
   echo '错误：节点展示补丁锚点不存在，停止。' >&2
   exit 1
 }
+grep -Fq "REALITY_SNI=\"\$(read_default 'REALITY SNI'" "$BASE_FILE" || {
+  echo '错误：REALITY SNI 自动选择补丁锚点不存在，停止。' >&2
+  exit 1
+}
 
 awk '
+function emit_auto_selector() {
+  print "auto_select_reality_target() {"
+  print "  local candidates host log start_ms end_ms ms best_host=\"\" best_ms=\"\" idx=0"
+  print "  candidates=\"www.apple.com www.microsoft.com www.mi.com www.samsung.com www.intel.com www.baidu.com www.qq.com www.10086.cn www.10010.com www.189.cn\""
+  print "  say"
+  print "  say \"========== 3A. 自动选择 REALITY SNI / 目标 ==========\""
+  print "  say \"将测试 10 个内置域名；仅接受 TLS 1.3、ALPN h2、证书匹配全部通过的目标，并选择当前机器 TLS 握手延迟最低者。\""
+  print "  for host in $candidates; do"
+  print "    idx=$((idx + 1))"
+  print "    log=\"$STAGE/reality-auto-$idx.log\""
+  print "    start_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
+  print "    timeout -k 1 8 openssl s_client -connect \"${host}:443\" -servername \"$host\" -tls1_3 -alpn h2 -verify_hostname \"$host\" -verify_return_error </dev/null >\"$log\" 2>&1 || true"
+  print "    end_ms=\"$(awk \047{printf \"%d\", $1 * 1000}\047 /proc/uptime 2>/dev/null || printf 0)\""
+  print "    if grep -q \047Verify return code: 0 (ok)\047 \"$log\" && grep -q \047ALPN protocol: h2\047 \"$log\"; then"
+  print "      case \"$start_ms:$end_ms\" in *[!0-9:]*|:*) ms=999999 ;; *) if (( end_ms >= start_ms )); then ms=$((end_ms - start_ms)); else ms=999999; fi ;; esac"
+  print "      printf \047  ✓ %-22s %6s ms\\n\047 \"${host}:443\" \"$ms\""
+  print "      if [[ -z \"$best_host\" || \"$ms\" -lt \"$best_ms\" ]]; then best_host=\"$host\"; best_ms=\"$ms\"; fi"
+  print "    else"
+  print "      printf \047  - %-22s 跳过（TLS 1.3 / h2 / 证书 / 连通性未全部通过）\\n\047 \"${host}:443\""
+  print "    fi"
+  print "  done"
+  print "  [[ -n \"$best_host\" ]] || die \04710 个内置 REALITY 目标均未通过严格检查；未写业务配置\047"
+  print "  REALITY_SNI=\"$best_host\""
+  print "  REALITY_DEST=\"${best_host}:443\""
+  print "  say \"自动选择：SNI=${REALITY_SNI}；目标=${REALITY_DEST}；TLS 握手约 ${best_ms} ms\""
+  print "}"
+  print ""
+}
 {
   line=$0
   if (line == "readonly SCRIPT_VERSION=\"1.1\"") {
-    line="readonly SCRIPT_VERSION=\"1.1.2\""
+    line="readonly SCRIPT_VERSION=\"1.1.3\""
   }
 
   # Installation asks for the Quantumult X name once. Telegram uses that same value.
@@ -108,6 +141,22 @@ awk '
     line="标准 VLESS 链接："
   }
 
+  # Add the selector before old values are loaded; it is called later from read_settings.
+  if (line == "load_old_values() {") {
+    emit_auto_selector()
+  }
+
+  # Replace the old manual SNI + target prompts. Target remains synchronized to SNI:443.
+  if (index(line, "REALITY_SNI=\"$(read_default \047REALITY SNI\047") > 0) {
+    print "  auto_select_reality_target"
+    skip_sni=5
+    next
+  }
+  if (skip_sni > 0) {
+    skip_sni--
+    next
+  }
+
   print line
 }
 ' "$BASE_FILE" > "$PATCHED_FILE"
@@ -115,7 +164,7 @@ awk '
 chmod 700 "$PATCHED_FILE"
 
 # Verify all intended changes before executing anything as root.
-grep -Fq 'readonly SCRIPT_VERSION="1.1.2"' "$PATCHED_FILE" || {
+grep -Fq 'readonly SCRIPT_VERSION="1.1.3"' "$PATCHED_FILE" || {
   echo '错误：版本补丁未生效。' >&2
   exit 1
 }
@@ -131,11 +180,27 @@ grep -Fq 'DEVICE_NAME="$NODE_NAME"' "$PATCHED_FILE" || {
   echo '错误：Telegram/Quantumult X 同名补丁未生效。' >&2
   exit 1
 }
+grep -Fq 'auto_select_reality_target() {' "$PATCHED_FILE" || {
+  echo '错误：REALITY 自动选择函数未注入。' >&2
+  exit 1
+}
+grep -Fq 'www.10086.cn www.10010.com www.189.cn' "$PATCHED_FILE" || {
+  echo '错误：三大运营商候选域名未注入。' >&2
+  exit 1
+}
+[[ "$(grep -Fc '  auto_select_reality_target' "$PATCHED_FILE")" -eq 1 ]] || {
+  echo '错误：REALITY 自动选择调用数量异常。' >&2
+  exit 1
+}
+if grep -Fq "read_default 'REALITY SNI'" "$PATCHED_FILE"; then
+  echo '错误：旧 REALITY SNI 手工输入仍存在。' >&2
+  exit 1
+fi
 
 bash -n "$PATCHED_FILE" || {
   echo '错误：修补后的安装器语法检查失败。' >&2
   exit 1
 }
 
-echo '补丁校验通过，开始运行 VPS 安装器 1.1.2。'
+echo '补丁校验通过，开始运行 VPS 安装器 1.1.3。'
 bash "$PATCHED_FILE" "$@"
