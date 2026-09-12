@@ -15,7 +15,7 @@ BASE_COMMIT='766e13d9f7a0e17c3616538882b707a5468633f4'
 BASE_SHA256='12dae0a29d5e21be2c66162afa2f4c199dcea3d4ef53acd8fde00d0438f21789'
 REPO='sajik1/node-suite'
 BASE_PATH='router/install-router-complete.sh'
-LOCAL_BASE_NAME='install-router-complete-base-v1.1.sh'
+LOCAL_BASE_NAME='install-router-base.sh'
 
 case "${1:-}" in
     --version) echo "$SCRIPT_VERSION"; exit 0 ;;
@@ -71,14 +71,12 @@ API_URL="https://api.github.com/repos/${REPO}/contents/${BASE_PATH}?ref=${BASE_C
 fetch_base() {
     if [ -s "$LOCAL_BASE" ]; then
         cp "$LOCAL_BASE" "$BASE_FILE"
-        echo '使用安装包内固定版本路由器基础脚本。'
+        echo '使用安装包内固定基础脚本。'
         return 0
     fi
 
     echo '安装包内未找到基础脚本，尝试从 GitHub 固定提交获取。'
     if command -v curl >/dev/null 2>&1; then
-        # Raw 在部分家宽上可能已经建立 TCP/TLS 但长期 0 bytes；
-        # 给 Raw 较短的总传输上限，尽快切换 Contents API，而不是卡数分钟。
         if curl -4 -fL --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 \
             "$RAW_URL" -o "$BASE_FILE"; then
             return 0
@@ -101,21 +99,21 @@ fetch_base() {
         wget -T 45 -O "$BASE_FILE" "$RAW_URL" && return 0
         rm -f "$BASE_FILE"
     fi
-    echo '错误：无法获取固定版本基础脚本；请使用完整安装包（含 install-router-complete-base-v1.1.sh）或确保 curl/uclient-fetch/wget 可用。' >&2
+    echo '错误：无法获取固定基础脚本；请使用完整安装包（含 install-router-base.sh）或确保 curl/uclient-fetch/wget 可用。' >&2
     return 1
 }
 
 echo '========== 获取固定版本路由器安装器 =========='
 fetch_base
-[ -s "$BASE_FILE" ] || { echo '错误：固定版本基础脚本为空。' >&2; exit 1; }
+[ -s "$BASE_FILE" ] || { echo '错误：固定基础脚本为空。' >&2; exit 1; }
 ACTUAL_SHA="$(base_sha256 "$BASE_FILE")"
 [ "$ACTUAL_SHA" = "$BASE_SHA256" ] || {
-    echo "错误：固定版本基础脚本 SHA256 不匹配：$ACTUAL_SHA" >&2
+    echo "错误：固定基础脚本 SHA256 不匹配：$ACTUAL_SHA" >&2
     exit 1
 }
 
 grep -Fq "SCRIPT_VERSION='1.1'" "$BASE_FILE" || {
-    echo '错误：固定版本脚本版本锚点不匹配，停止。' >&2
+    echo '错误：固定基础脚本版本锚点不匹配，停止。' >&2
     exit 1
 }
 grep -Fq 'prepare_router_reality() {' "$BASE_FILE" || {
@@ -159,12 +157,12 @@ function emit_selector_body() {
     print "            probe=$((probe + 1))"
     print "        done"
     print "        if [ \"$fail\" -eq 0 ] && [ -n \"$a\" ] && [ -n \"$b\" ] && [ -n \"$c\" ]; then"
-    print "            x1=\"$a\"; x2=\"$b\"; x3=\"$c\""
-    print "            if [ \"$x1\" -gt \"$x2\" ]; then tmp=\"$x1\"; x1=\"$x2\"; x2=\"$tmp\"; fi"
-    print "            if [ \"$x2\" -gt \"$x3\" ]; then tmp=\"$x2\"; x2=\"$x3\"; x3=\"$tmp\"; fi"
-    print "            if [ \"$x1\" -gt \"$x2\" ]; then tmp=\"$x1\"; x1=\"$x2\"; x2=\"$tmp\"; fi"
-    print "            median=\"$x2\""
-    print "            printf \047  ✓ %-22s 3次=%s/%s/%s ms  中位数=%s ms\\n\047 \"$host:443\" \"$a\" \"$b\" \"$c\" \"$median\""
+    print "            x1=$a; x2=$b; x3=$c"
+    print "            if [ \"$x1\" -gt \"$x2\" ]; then tmp=$x1; x1=$x2; x2=$tmp; fi"
+    print "            if [ \"$x2\" -gt \"$x3\" ]; then tmp=$x2; x2=$x3; x3=$tmp; fi"
+    print "            if [ \"$x1\" -gt \"$x2\" ]; then tmp=$x1; x1=$x2; x2=$tmp; fi"
+    print "            median=$x2"
+    print "            printf \047  ✓ %-22s %6s / %6s / %6s ms  中位数 %6s ms\\n\047 \"$host:443\" \"$a\" \"$b\" \"$c\" \"$median\""
     print "            if [ -z \"$best_host\" ] || [ \"$median\" -lt \"$best_ms\" ]; then"
     print "                best_host=\"$host\""
     print "                best_ms=\"$median\""
@@ -176,7 +174,7 @@ function emit_selector_body() {
     print "    [ -n \"$best_host\" ] || die \04712 个内置 REALITY 目标均未通过 3 次严格检查；尚未写业务配置\047"
     print "    REALITY_SNI=\"$best_host\""
     print "    REALITY_DEST=\"$best_host:443\""
-    print "    say \"自动选择：SNI=$REALITY_SNI；目标=$REALITY_DEST；3 次 TLS 握手中位数约 ${best_ms} ms\""
+    print "    say \"自动选择：SNI=$REALITY_SNI；目标=$REALITY_DEST；3 次握手中位数约 ${best_ms} ms\""
 }
 {
     line=$0
@@ -226,8 +224,8 @@ if grep -Fq 'www.baidu.com' "$PATCHED_FILE"; then
     echo '错误：旧百度候选域名仍存在。' >&2
     exit 1
 fi
-grep -Fq '3 次 TLS 握手中位数约 ${best_ms} ms' "$PATCHED_FILE" || {
-    echo '错误：REALITY 三次握手中位数逻辑未注入。' >&2
+grep -Fq '3 次握手中位数约 ${best_ms} ms' "$PATCHED_FILE" || {
+    echo '错误：REALITY 三次中位数选择逻辑未注入。' >&2
     exit 1
 }
 grep -Fq '自动选择：SNI=$REALITY_SNI；目标=$REALITY_DEST' "$PATCHED_FILE" || {
