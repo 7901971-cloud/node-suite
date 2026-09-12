@@ -86,9 +86,19 @@ npm ci --no-audit --no-fund
 WRANGLER="$BASE_DIR/node_modules/.bin/wrangler"
 [ -x "$WRANGLER" ] || die "Wrangler 安装失败"
 
-if ! "$WRANGLER" whoami >/dev/null 2>&1; then
-  say "即将打开浏览器登录 Cloudflare。"
-  "$WRANGLER" login
+WHOAMI_OUTPUT=''
+if ! retry_capture WHOAMI_OUTPUT '检查 Cloudflare 登录状态' "$WRANGLER" whoami; then
+  if printf '%s' "$WHOAMI_OUTPUT" | grep -Eqi 'not authenticated|not logged|login|authentication'; then
+    say "Cloudflare 登录已失效，即将打开浏览器重新登录。"
+    "$WRANGLER" login
+    retry_capture WHOAMI_OUTPUT '重新确认 Cloudflare 登录状态' "$WRANGLER" whoami || {
+      [ -n "$WHOAMI_OUTPUT" ] && say "$WHOAMI_OUTPUT" >&2
+      die '重新登录后仍无法确认 Cloudflare 状态'
+    }
+  else
+    [ -n "$WHOAMI_OUTPUT" ] && say "$WHOAMI_OUTPUT" >&2
+    die 'Cloudflare 登录状态连续 3 次无法确认，更像本机到 Cloudflare API 的网络/代理故障；本次停止，不重复触发 OAuth，请恢复网络后重跑同一命令'
+  fi
 fi
 
 cat > "$GATEWAY_DIR/wrangler.jsonc" <<EOF
@@ -190,6 +200,7 @@ fi
 
 say
 say "Pages 监控入口：$PAGES_URL"
-say "下一步先从路由器执行："
+say "可选验证："
 say "  curl -6 -sS --noproxy '*' --connect-timeout 8 --max-time 20 '$PAGES_URL/health'"
-say "看到 \"ok\":true 后，使用这个 Pages 地址重新配对。"
+say "首次新增设备：确认 \"ok\":true 后，从 Telegram 获取配对码并配对。"
+say "已有设备升级/重部署：不需要重新配对，原设备和 D1 数据继续保留。"
