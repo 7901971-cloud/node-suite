@@ -8,7 +8,9 @@
 - VPS 安装器：`1.1.3`
 - Cloudflare / Telegram 控制中心：`3.7.0`
 
-当前固定代码提交：`9c480781c71e2a1e71b09602ed1c5b2d18f28384`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
+当前固定代码提交：`eb612142c6c78bc088e0c45178e1427d6a4716fe`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
+
+> `npm ci` 日志里的包名仍可能显示 `node-center-cloudflare-tgbot@3.6.0`，这是基础包元数据；安装时 `apply-index-patch.mjs` 会应用 3.7 运行时补丁，最终以 `/health` 返回的 `version":"3.7.0"` 为实际控制中心版本。
 
 ## 最新变化
 
@@ -91,9 +93,9 @@ Webhook 设置流程同时增加：
 - `setWebhook` 最多重试 3 次。
 - 不再用 `curl -f` 吞掉 Telegram 的 400 响应正文；失败时会直接显示 Telegram 原始错误，方便定位。
 - Worker Webhook 设置失败时，如果同名 Pages 网关已经存在且 `/health` 正常，会自动尝试 `https://<Pages项目>.pages.dev/telegram/webhook`。
-- `setMyCommands` 失败会显示警告，但不会隐藏原始 Telegram 返回内容。
+- `setMyCommands` 会自动重试；最终仍失败只报警，不隐藏 Telegram 原始返回。
 
-如果一次部署停在 `curl: (56) ... 400`，直接使用本 README 的最新版部署命令重新运行即可；不需要重新安装路由器/VPS，也不需要重新配对已有设备。
+如果一次部署停在 Telegram API 错误，直接使用本 README 的同一固定部署命令重新运行即可；不需要重新安装路由器/VPS，也不需要重新配对已有设备。
 
 ### Pages 网关部署保护
 
@@ -104,6 +106,7 @@ Pages 部署阶段现在对 Cloudflare API 瞬时 `fetch failed` 做完整容错
 - 只有项目列表和稳定 Pages 健康检查都无法确认现有项目时，才尝试创建；创建请求也会重试 3 次。
 - `wrangler pages deploy` 同样最多重试 3 次。
 - 稳定 Pages 地址直接使用 `https://<Pages项目>.pages.dev`，不再依赖部署后的第二次项目列表查询。
+- Cloudflare 登录状态先重试确认；普通 `fetch failed` 不会立即重复触发 OAuth。只有明确的登录/认证错误才打开浏览器重新登录。
 
 Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pages 地址写入 Worker 的 `PUBLIC_GATEWAY_URL`，用于 Telegram 菜单和云端回退：
 
@@ -113,6 +116,30 @@ Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pa
 
 因此，若本机访问 Pages `/health` 正常，但 Wrangler 的项目列表、创建、部署或 Secret 写入阶段出现 `fetch failed`，首先应视为 **Mac 到 Cloudflare 管理 API 的临时网络/代理问题**，而不是路由器、VPS、D1 或 Pages 公网入口本身故障。
 
+### Worker / D1 重部署保护
+
+完整部署的第一阶段也加入了与 Pages 相同的保护，避免下次在 Worker/D1 阶段重新遇到同类问题：
+
+- Cloudflare `whoami` 先重试 3 次；普通网络错误不会误判为“登录失效”。
+- D1 列表读取最多重试 3 次；如果始终无法读取，会安全停止，**不会因为 API 故障误创建第二个数据库**。
+- D1 首次创建、schema 初始化、兼容数据更新均带重试。
+- Worker Secret 列表最多重试 3 次。若现有 Worker 的 Secret 列表无法确认，会在写入任何 Secret 前停止，避免把网络故障误判为“没有 `DATA_ENCRYPTION_KEY`”。
+- 已存在的 `DATA_ENCRYPTION_KEY` 永远优先保留；不会因为 Secret 查询失败而随机生成新密钥覆盖旧值。
+- Telegram Bot Token、Webhook Secret、Owner、Bot 用户名等 Secret 写入均最多重试 3 次。
+- Worker 部署最多重试 3 次；Worker `/health` 也会重复检查。
+
+这项保护很重要：已有设备的 `node_cipher` 依赖原 `DATA_ENCRYPTION_KEY`。因此脚本现在宁可在无法确认 Secret 状态时停止，也不会冒险轮换数据加密密钥。
+
+### 重复部署原则
+
+已有项目以后升级时：
+
+- 继续填写 **原 Worker 名称、原 D1 名称、原 Pages 项目名称、原 Bot Token**。
+- 不要因为一次 `fetch failed` 临时换项目名、重新建 D1 或重新创建 Bot。
+- 脚本最终因 Cloudflare API 网络错误停止时，恢复网络后直接重跑**同一固定提交、同一名称**即可。
+- 已有路由器/VPS **不需要重新配对**；D1 内设备、权限、节点记录继续复用。
+- 只有首次添加一台新设备时，才从 Telegram → 节点管理 → 添加设备 获取新的配对码。
+
 ## 1. 部署或复用 Cloudflare / Telegram
 
 在 Mac 终端执行：
@@ -120,7 +147,7 @@ Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pa
 ```bash
 (
 set -eu
-REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
+REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
@@ -139,7 +166,7 @@ bash cloudflare/deploy-complete.sh
 在 OpenWrt/Kwrt 的 SSH 终端执行：
 
 ```sh
-REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
+REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -168,7 +195,7 @@ cd ~/Downloads
 rm -rf node-suite-1.2
 git clone https://github.com/sajik1/node-suite.git node-suite-1.2
 cd node-suite-1.2
-git checkout 9c480781c71e2a1e71b09602ed1c5b2d18f28384
+git checkout eb612142c6c78bc088e0c45178e1427d6a4716fe
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -179,7 +206,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu 和 systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
+REF='eb612142c6c78bc088e0c45178e1427d6a4716fe'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'
