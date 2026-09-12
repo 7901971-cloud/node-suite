@@ -8,7 +8,7 @@
 - VPS 安装器：`1.1.3`
 - Cloudflare / Telegram 控制中心：`3.7.0`
 
-当前固定代码提交：`796841199b45d4a47d48e664eeadd3fc5181d378`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
+当前固定代码提交：`9c480781c71e2a1e71b09602ed1c5b2d18f28384`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
 
 ## 最新变化
 
@@ -95,17 +95,23 @@ Webhook 设置流程同时增加：
 
 如果一次部署停在 `curl: (56) ... 400`，直接使用本 README 的最新版部署命令重新运行即可；不需要重新安装路由器/VPS，也不需要重新配对已有设备。
 
-### Pages 网关地址写入保护
+### Pages 网关部署保护
 
-Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pages 地址写入 Worker 的 `PUBLIC_GATEWAY_URL`，用于 Telegram 菜单和云端回退。
+Pages 部署阶段现在对 Cloudflare API 瞬时 `fetch failed` 做完整容错：
 
-新版对这一步增加容错：
+- `wrangler pages project list --json` 最多重试 3 次。
+- 如果项目列表 API 连续失败，但 `https://<Pages项目>.pages.dev/health` 已经正常，会据此确认同名 Pages 项目确实存在，直接走复用逻辑，不会误判成“需要创建新项目”。
+- 只有项目列表和稳定 Pages 健康检查都无法确认现有项目时，才尝试创建；创建请求也会重试 3 次。
+- `wrangler pages deploy` 同样最多重试 3 次。
+- 稳定 Pages 地址直接使用 `https://<Pages项目>.pages.dev`，不再依赖部署后的第二次项目列表查询。
 
-- `wrangler secret put PUBLIC_GATEWAY_URL` 最多重试 3 次，避免本机到 Cloudflare API 的瞬时网络错误直接终止整套部署。
+Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pages 地址写入 Worker 的 `PUBLIC_GATEWAY_URL`，用于 Telegram 菜单和云端回退：
+
+- `wrangler secret put PUBLIC_GATEWAY_URL` 最多重试 3 次。
 - 如果复用的是已经存在的同名 Pages 项目，Pages 稳定地址本身没有变化，而写 Secret 连续失败，则保留 Worker 中原有 `PUBLIC_GATEWAY_URL` 并以警告结束，不再把这种临时 API 故障误判成整套部署失败。
 - 如果是首次新建 Pages 项目，新的 Pages 地址从未写入 Worker，而 3 次写入仍全部失败，则继续失败关闭，避免留下不完整的新部署。
 
-因此看到 `Pages入口能力检查通过` 后又遇到 Wrangler 的 `fetch failed`，通常说明 Pages 本身已经可用，失败点只是 Mac 到 Cloudflare API 的 Secret 写入请求，不会修改路由器/VPS配置。
+因此，若本机访问 Pages `/health` 正常，但 Wrangler 的项目列表、创建、部署或 Secret 写入阶段出现 `fetch failed`，首先应视为 **Mac 到 Cloudflare 管理 API 的临时网络/代理问题**，而不是路由器、VPS、D1 或 Pages 公网入口本身故障。
 
 ## 1. 部署或复用 Cloudflare / Telegram
 
@@ -114,7 +120,7 @@ Pages Function 部署成功且 `/health` 已通过后，脚本会把稳定的 Pa
 ```bash
 (
 set -eu
-REF='796841199b45d4a47d48e664eeadd3fc5181d378'
+REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
@@ -133,7 +139,7 @@ bash cloudflare/deploy-complete.sh
 在 OpenWrt/Kwrt 的 SSH 终端执行：
 
 ```sh
-REF='796841199b45d4a47d48e664eeadd3fc5181d378'
+REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -162,7 +168,7 @@ cd ~/Downloads
 rm -rf node-suite-1.2
 git clone https://github.com/sajik1/node-suite.git node-suite-1.2
 cd node-suite-1.2
-git checkout 796841199b45d4a47d48e664eeadd3fc5181d378
+git checkout 9c480781c71e2a1e71b09602ed1c5b2d18f28384
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -173,7 +179,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu 和 systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='796841199b45d4a47d48e664eeadd3fc5181d378'
+REF='9c480781c71e2a1e71b09602ed1c5b2d18f28384'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'
