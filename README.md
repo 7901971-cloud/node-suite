@@ -2,15 +2,85 @@
 
 安装器会检测现有配置：存在本套件配置时复用设备身份、节点参数和数据库；不存在时执行全新安装。不会接管无关的 SSH 或代理配置。
 
-当前仓库为 `sajik1/node-suite`。Cloudflare 3.6.0 新增统一三级权限、群聊管理和入群验证。已安装的路由器/VPS 不需要更新，本次只需重新部署 Cloudflare。
+当前组件版本：
 
-下面 Cloudflare 命令固定到本次代码提交 `4d62120aa7b05dcb660993d1330a6e17bb54b8f6`；路由器/VPS 命令保留已有稳定提交，不会随 `main` 分支变化。
+- 路由器安装器：`1.2`
+- VPS 安装器：`1.1.3`
+- Cloudflare / Telegram 控制中心：`3.7.0`
 
-保留此前 VPS 1.1.2 hotfix：
+当前固定代码提交：`aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742`。下面的部署/安装命令均固定到该不可变提交，不会因为 `main` 后续变化而执行未知代码。
 
-- Quantumult X 节点名称只输入一次，Telegram 设备名称自动保持一致。
-- Telegram“当前节点”不再把 `vless:// 通用链接：` 标题误识别为额外节点。
-- 下载优先使用 GitHub Raw IPv4；Raw 异常时自动回退 GitHub Contents API，避免部分 VPS 出现 Raw 404/IPv6 路径异常后直接中止。
+## 最新变化
+
+### REALITY SNI / target 自动选择
+
+路由器和 VPS 安装器会在安装/复用流程中自动测试 10 个内置候选域名，仅保留同时满足以下条件的目标：
+
+- TLS 1.3 握手成功
+- ALPN 协商为 `h2`
+- 证书与域名匹配并验证通过
+- 当前机器可以正常连接
+
+通过严格检查后，脚本选择 **TLS 握手延迟最低** 的域名作为 REALITY SNI，并自动同步：
+
+```text
+SNI=<选中的域名>
+target=<选中的域名>:443
+```
+
+10 个候选域名：
+
+```text
+www.apple.com
+www.microsoft.com
+www.mi.com
+www.samsung.com
+www.intel.com
+www.baidu.com
+www.qq.com
+www.10086.cn
+www.10010.com
+www.189.cn
+```
+
+其中后三个分别为中国移动、中国联通、中国电信官网候选。运营商官网不会被强制优先，仍然必须通过 TLS 1.3 / h2 / 证书校验，并与其它候选一起按当前设备实测握手延迟选择。
+
+### Telegram 当前节点 / 节点配置
+
+Cloudflare 3.7.0 调整了节点展示和配置逻辑：
+
+- 点击 **当前节点** 只返回 **1 条 Quantumult X 整行导入配置**，不再额外返回第二条标准 `vless://` 链接。
+- Quantumult X 配置会根据当前 SNI 自动加入：
+
+```text
+server_check_url=http://<当前SNI>/generate_204
+```
+
+例如当前 SNI 为 `www.mi.com`：
+
+```text
+server_check_url=http://www.mi.com/generate_204
+```
+
+- 节点配置中的 REALITY 入口统一为 **修改 SNI**；修改后 target 仍自动同步为 `SNI:443`。
+- **节点端口**仍保留单独修改，因为它是 VLESS/Xray 的入站监听端口，不是 REALITY target 的 `443`。
+- UUID、REALITY 密钥和 Short ID 仍可按原逻辑管理。
+
+### 外部入站检测
+
+Cloudflare 的 TCP 外部探测只代表 **Cloudflare 当前出口到节点公网地址/端口** 的可达性，不再把一次外部连接失败直接等同于“节点公网不可用”。
+
+新版逻辑：
+
+- TCP 外部探测最多重试 3 次。
+- 探测成功：显示 `公网入站已验证` / `公网可连接`。
+- Cloudflare 探测失败，但设备本机确认 Xray TCP 正常监听：显示 `外部探测未确认`，不会误报为入站失败。
+- 本机 TCP 自身未监听：显示 `本机 TCP 未监听`。
+- 同一公网地址和端口此前已经验证成功时，临时探测失败不会轻易把已验证状态降级。
+
+因此 `外部探测未确认` 的含义是：**当前 Cloudflare 探测点没有连通，但不能据此证明其它公网客户端无法连接。**
+
+Cloudflare 3.7.0 的上述 Telegram/UI/探测逻辑不需要重新安装路由器或 VPS，也不需要重新配对设备；重新部署 Cloudflare 后点击 **实时刷新** 即可使用新版逻辑。
 
 ## 1. 部署或复用 Cloudflare / Telegram
 
@@ -19,23 +89,26 @@
 ```bash
 (
 set -eu
+REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
 git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
 cd "$WORK/repo"
-git checkout --detach 4d62120aa7b05dcb660993d1330a6e17bb54b8f6
+git checkout --detach "$REF"
 bash -n cloudflare/deploy-complete.sh
 bash cloudflare/deploy-complete.sh
 )
 ```
 
-需要 Node.js 22+、npm 和 Cloudflare 账号。同名 Worker、D1、Pages 存在时复用，不存在时创建。原数据加密密钥存在时会保留。更新现有 Bot 时填写原 Worker、D1 和 Pages 名称；部署会补齐新表、成员事件 Webhook 订阅和每分钟验证清理任务。
+需要 Node.js 22+、npm 和 Cloudflare 账号。同名 Worker、D1、Pages 存在时复用，不存在时创建。原数据加密密钥存在时会保留。更新现有 Bot 时填写原 Worker、D1 和 Pages 名称；部署会复用现有设备与权限数据。
+
+部署完成后 `/health` 应显示 Cloudflare 控制中心版本 `3.7.0`。
 
 ## 2. 安装或复用路由器节点
 
 在 OpenWrt/Kwrt 的 SSH 终端执行：
 
 ```sh
-REF='3948e0a25283d452d66f32eb9f7543f7ffdf0645'
+REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
 OUT='/tmp/install-router-complete.sh'
@@ -53,16 +126,18 @@ sh -n "$OUT" && \
 sh "$OUT"
 ```
 
-首次安装会随机生成 TCP 端口；已有节点则默认复用原端口和密钥。默认 SNI/目标为 `www.apple.com:443`。
+路由器安装器 1.2 会固定读取经过 SHA256 校验的 1.1 基础安装器，再做确定性补丁后执行。现有套件节点默认复用设备身份、端口和密钥；旧 sing-box/SS 节点不会在新 VLESS 验收前被自动删除。
+
+REALITY SNI 和 target 不再手工输入，安装时自动从上述 10 个域名中严格测试并选择最低延迟可用目标，target 自动同步为 `SNI:443`。
 
 MT7621/MIPS 路由器无法直接下载 Xray 时，在 Mac 执行：
 
 ```bash
 cd ~/Downloads
-rm -rf node-suite-1.1.2
-git clone https://github.com/sajik1/node-suite.git node-suite-1.1.2
-cd node-suite-1.1.2
-git checkout 3948e0a25283d452d66f32eb9f7543f7ffdf0645
+rm -rf node-suite-1.2
+git clone https://github.com/sajik1/node-suite.git node-suite-1.2
+cd node-suite-1.2
+git checkout aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -73,7 +148,7 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu 和 systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='3948e0a25283d452d66f32eb9f7543f7ffdf0645'
+REF='aa2d60cbc8f9a26888cf738b18f3ac3e2dd11742'
 RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
 API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
 OUT='/root/install-vless-reality-vps.sh'
@@ -91,18 +166,26 @@ bash -n "$OUT" && \
 bash "$OUT"
 ```
 
-VPS 安装器 1.1.2 会固定读取 `v1.1` 的完整基础安装器，在本机做确定性补丁并执行。基础脚本不会从可变 `main` 获取。
+VPS 安装器 1.1.3 固定读取 `v1.1` 的完整基础安装器，在本机做确定性补丁后执行；基础脚本不会从可变 `main` 获取。
 
-首次安装会随机生成 TCP 端口；已有节点则默认复用原端口和密钥。默认 SNI/目标为 `www.apple.com:443`。云安全组必须放行最终显示的 TCP 端口。
+当前 VPS 安装器包含：
 
-安装时只填写一次 `Quantumult X 节点名称`；Telegram 设备名称会自动使用同一个名称。
+- Quantumult X 节点名称只输入一次，Telegram 设备名称自动保持一致。
+- GitHub Raw 优先走 IPv4；Raw 异常时回退 GitHub Contents API。
+- REALITY SNI / target 自动从 10 个候选域名中严格测试并选择最低 TLS 握手延迟目标。
+- target 自动同步为 `SNI:443`。
+
+首次安装会随机生成 VLESS TCP 入站端口；已有节点默认复用原端口和密钥。云安全组必须放行最终显示的 TCP 入站端口。
 
 ## 4. Telegram 使用
 
 - 主菜单只有 **节点管理 / Bot 管理** 两部分。
 - 节点管理 → **添加设备**：同一张卡片获取 Pages 地址和一次性配对码。
 - 设备 → **实时刷新**：通过命令代理立即要求设备完整上报，通常约 10 秒返回。
-- **当前节点、SSH 地址、命令结果**均允许复制。
+- **当前节点**：只返回 1 条 Quantumult X 整行导入配置，并自动带当前 SNI 对应的 `server_check_url`。
+- **SSH 地址、命令结果**允许复制。
+- 节点配置 → **修改 SNI**：输入新域名后，设备同步更新 REALITY SNI 和 `<域名>:443` target；客户端需重新导入节点。
+- 节点监听端口、UUID、REALITY 密钥、Short ID 仍按独立配置项管理。
 - **管理员**：所有功能，包括添加/删除用户与管理员、Bot 设置、群规则；至少保留一位管理员。
 - **控制用户**：设备管理、配对/移除、改节点配置、重启和 root Shell；不能改 Bot 权限。
 - **只读用户**：查询设备、节点与 SSH 信息及刷新状态，不能修改设备配置。
@@ -114,19 +197,30 @@ VPS 安装器 1.1.2 会固定读取 `v1.1` 的完整基础安装器，在本机�
 
 详细步骤与命令：[Telegram 管理说明](docs/telegram-management.md)。
 
-VPS 的“当前节点”正常只显示两项：
+Quantumult X 当前节点示例：
 
-1. `Quantumult X 整行导入`
-2. `标准 VLESS 链接`
-
-不会再额外显示只有 `vless:// 通用链接：` 文字的无效节点卡片。
+```text
+vless=example.duckdns.org:35930, method=none, password=<UUID>, obfs=over-tls, obfs-host=www.mi.com, reality-base64-pubkey=<PUBLIC_KEY>, reality-hex-shortid=<SHORT_ID>, vless-flow=xtls-rprx-vision, udp-relay=true, fast-open=false, server_check_url=http://www.mi.com/generate_204, tag=节点名称
+```
 
 ## 5. 网络状态
 
-路由器/VPS 上报公网地址后，Cloudflare 会从外部测试节点 TCP 端口，并在完整状态中显示：
+路由器/VPS 上报公网地址和本机监听状态后，Cloudflare 会尝试从外部测试节点 TCP 端口。
 
-- `公网可连接`：外部 TCP 入站验证通过。
-- `TCP 入站未通过`：有公网地址，但端口从外部无法连接。
-- `等待外部检测`：尚未完成第一次外部验证。
+状态含义：
+
+- `公网可连接` / `公网入站已验证`：Cloudflare 外部 TCP 探测成功。
+- `外部探测未确认`：设备有公网地址且本机 TCP 正常监听，但 Cloudflare 当前出口没有完成外部连通验证；**不代表其它公网客户端不能使用**。
+- `本机 TCP 未监听`：设备自己上报代理 TCP 端口没有监听，需要检查 Xray/服务本身。
+- `等待外部检测`：尚未获得有效外部验证结果。
+- `无公网地址`：该协议族没有检测到可发布公网地址。
+
+手动点击 **外部探测** 时，Cloudflare 会重试 TCP 探测；若仍失败但设备本机监听正常，会明确提示：
+
+```text
+Cloudflare 当前探测点未连通（不代表公网不可用）
+```
+
+同一公网 IP 和节点端口此前已验证成功时，后续短暂的 Cloudflare 出口失败不会轻易清除已验证状态。
 
 路由器 DDNS 每 5 分钟检查，并在接口地址变化后触发检查。私网 IPv4、CGNAT 或仅获得 IPv6 地址并不自动代表公网可以入站。
