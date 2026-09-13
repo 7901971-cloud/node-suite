@@ -8,7 +8,7 @@ import {groupUpdate,groupCallback,groupMaintenance,matchRule} from '../src/group
 let source=readFileSync(new URL('../src/index.js',import.meta.url),'utf8');
 source=source.replace('import { connect } from "cloudflare:sockets";', 'const connect = () => { throw new Error("TCP disabled in tests"); };');
 source=source.replace("from './groups.js'",`from '${new URL('../src/groups.js',import.meta.url).href}'`);
-source+='\nexport {accessFor,initializeAdmins,rootKeyboard,commandRole,consumePendingInput,savePendingInput,handleMessage,handleCallback,groupServices,enqueueDeviceCommand,pollDeviceCommand,sha256Hex,createPairCode,notifyOwnersProtected};';
+source+='\nexport {accessFor,initializeAdmins,rootKeyboard,commandRole,consumePendingInput,savePendingInput,handleMessage,handleCallback,groupServices,enqueueDeviceCommand,pollDeviceCommand,sha256Hex,createPairCode,notifyOwnersProtected,renameDevice,renameDeviceScript,renameNodeText,validDeviceName,receiveReport,showProbe,updateInboundStatus,inboundAlerts};';
 const bot=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const sql=readFileSync(new URL('../schema.sql',import.meta.url),'utf8');
 const CHAT='-100123456789',OWNER='11111',ADMIN='22222',OP='33333',VIEW='44444',STRANGER='55555';
@@ -198,4 +198,42 @@ test('flood threshold mutes once it exceeds 8 messages; switch off does nothing'
 test('unauthorized user can retrieve only own ID in private chat',async()=>{
   const f=await base();const request=new Request('https://test/telegram/webhook',{method:'POST',headers:{'x-telegram-bot-api-secret-token':'test','content-type':'application/json'},body:JSON.stringify({message:{...f.message(STRANGER,'/id'),chat:{id:Number(STRANGER),type:'private'}}})});
   await bot.default.fetch(request,f.env,{waitUntil(){}});assert.match(f.calls.at(-1).text,new RegExp(STRANGER));assert.equal(await f.access(STRANGER,false),null);
+});
+
+test('rename is restricted, unique and survives old device reports',async()=>{
+  const f=await base(),id='aaaaaaaaaaaaaaaa',token='x'.repeat(40);
+  f.db.prepare("INSERT INTO devices(id,name,token_hash,created_at,status_json) VALUES(?,?,?,1,'{}')").run(id,'旧名',await bot.sha256Hex(token));
+  await bot.renameDevice(f.env,f.message(VIEW,'新名'),id,'新名',await f.access(VIEW));
+  assert.equal(f.db.prepare('SELECT name FROM devices').get().name,'旧名');
+  await bot.handleCallback(f.callback(OP,`rn:rename:${id}`),f.env,await f.access(OP));
+  await bot.consumePendingInput(f.message(OP,'🇨🇳重庆2'),f.env,await f.access(OP));
+  assert.equal(f.db.prepare('SELECT name FROM devices').get().name,'🇨🇳重庆2');
+  assert.equal(f.db.prepare('SELECT action FROM device_commands').get().action,'shell');
+  const form=new FormData();form.set('device_name','旧名');
+  const response=await bot.receiveReport(new Request('https://test/api/v1/report',{method:'POST',headers:{'x-device-id':id,authorization:`Bearer ${token}`},body:form}),f.env);
+  assert.equal(response.status,200);
+  assert.equal(f.db.prepare('SELECT name FROM devices').get().name,'🇨🇳重庆2');
+  f.db.exec('DELETE FROM device_commands');
+  f.db.prepare("INSERT INTO devices(id,name,token_hash,created_at) VALUES('bbbbbbbbbbbbbbbb','占用','another',1)").run();
+  await bot.renameDevice(f.env,f.message(OP,'占用'),id,'占用',await f.access(OP));
+  assert.equal(f.db.prepare('SELECT name FROM devices WHERE id=?').get(id).name,'🇨🇳重庆2');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM device_commands').get().n,0);
+});
+
+test('node names preserve connection parameters and reject malformed names',()=>{
+  const name="🇨🇳 O'Reilly $() &";
+  assert.ok(bot.validDeviceName(name));
+  for(const bad of ['', 'x,y','x\ny','a'.repeat(49)])assert.equal(bot.validDeviceName(bad),false);
+  assert.equal(bot.renameNodeText('vless=host:38444, password=uuid, tag=old\nvless://uuid@host:38444?security=reality#old',name),`vless=host:38444, password=uuid, tag=${name}\nvless://uuid@host:38444?security=reality#${encodeURIComponent(name)}`);
+});
+
+test('failed probe replaces previous success and appears in abnormal device state',async()=>{
+  const f=await base(),id='aaaaaaaaaaaaaaaa';
+  const status={public4:'8.8.8.8',ss_port:38444,tcp_listen:true,inbound4:'reachable'};
+  f.db.prepare("INSERT INTO devices(id,name,token_hash,created_at,status_json,last_seen) VALUES(?,?,?,1,?,?)").run(id,'probe','hash',JSON.stringify(status),Math.floor(Date.now()/1000));
+  await bot.showProbe(f.env,OP,1,id,await f.access(OP));
+  const device=f.db.prepare('SELECT * FROM devices').get();
+  assert.equal(JSON.parse(device.status_json).inbound4,'blocked');
+  assert.deepEqual(JSON.parse(device.active_alerts),['inbound4']);
+  assert.equal(f.db.prepare("SELECT active FROM alerts WHERE code='inbound4'").get().active,1);
 });
