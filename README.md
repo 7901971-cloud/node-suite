@@ -4,14 +4,11 @@
 
 当前只维护这一套：
 
-- Node Suite：`1.2`
-- Cloudflare / Telegram：`3.7.0`
+- Node Suite：`1.3`
+- Cloudflare / Telegram：`3.8.0`
 - Xray：`v26.7.28`
-- 当前固定代码提交：`388448e61825f82185b78d4b8d477b350e48b29c`
 
-下面所有安装命令都固定到这个不可变提交。
-
-当前仓库只保留必要入口：路由器目录对外只有 `install-router-complete.sh` 和 MIPS 离线 Xray 辅助脚本；Cloudflare 对外只执行 `cloudflare/deploy-complete.sh`，其它脚本、源码、schema、Pages Function、依赖锁和测试文件都是它的运行或校验依赖，不需要手工执行。
+安装命令跟随 `main`，代码与本文同步维护，不再维护自建安装校验码或下载历史安装器打补丁。路由器与 VPS 均为可直接执行的独立脚本；Cloudflare 直接部署仓库源码。
 
 ## 1. REALITY SNI 自动选择
 
@@ -53,16 +50,8 @@ www.tiktok.com
 在 Mac 终端执行：
 
 ```bash
-(
-set -eu
-REF='388448e61825f82185b78d4b8d477b350e48b29c'
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/node-suite-cf.XXXXXX")"
-git clone --no-checkout https://github.com/sajik1/node-suite.git "$WORK/repo"
-cd "$WORK/repo"
-git checkout --detach "$REF"
-bash -n cloudflare/deploy-complete.sh
-bash cloudflare/deploy-complete.sh
-)
+work=$(mktemp -d)
+git clone --depth 1 https://github.com/sajik1/node-suite.git "$work/node-suite" && bash "$work/node-suite/cloudflare/deploy-complete.sh"
 ```
 
 要求：Node.js 22+、npm、Cloudflare 账号。
@@ -79,7 +68,7 @@ curl -sS --noproxy '*' 'https://你的Pages项目.pages.dev/health'
 
 ```text
 "ok":true
-"version":"3.7.0"
+"version":"3.8.0"
 ```
 
 ## 3. 安装或升级路由器节点
@@ -87,27 +76,12 @@ curl -sS --noproxy '*' 'https://你的Pages项目.pages.dev/health'
 在 OpenWrt/Kwrt SSH 终端执行：
 
 ```sh
-REF='388448e61825f82185b78d4b8d477b350e48b29c'
-RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/router/install-router-complete.sh"
-API="https://api.github.com/repos/sajik1/node-suite/contents/router/install-router-complete.sh?ref=$REF"
-OUT='/tmp/install-router-complete.sh'
-
-rm -f "$OUT"
-(
-  curl -4 -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 "$RAW" -o "$OUT" || \
-  curl -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 \
-    -H 'Accept: application/vnd.github.raw+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "$API" -o "$OUT"
-) && \
-chmod 700 "$OUT" && \
-sh -n "$OUT" && \
-sh "$OUT"
+curl -fL --retry 2 --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/sajik1/node-suite/main/router/install-router-complete.sh -o /tmp/install-router-complete.sh && sh /tmp/install-router-complete.sh
 ```
 
 安装器会优先复用现有设备身份、节点端口和密钥，不会主动接管无关 SSH/代理配置。已有 sing-box/SS 备用节点不会在新 VLESS 验收前自动删除。
 
-仓库中不再放单独的 router base 文件。`install-router-complete.sh` 会自行获取固定且经过 SHA256 校验的内部基础源码，GitHub Raw 超时后自动切换 Contents API，再应用当前补丁并做语法/锚点校验后执行。
+安装全部完成后自动删除本次运行的安装脚本；失败、中断、`--preflight` 和 `--version` 不删除。已安装服务、配置和备份保留。若 GitHub Raw 无法访问，可在 Mac 克隆仓库后用 scp 上传对应脚本执行。
 
 ### MIPS/MT7621 离线 Xray
 
@@ -115,10 +89,9 @@ Mac 执行：
 
 ```bash
 cd ~/Downloads
-rm -rf node-suite-1.2
-git clone https://github.com/sajik1/node-suite.git node-suite-1.2
-cd node-suite-1.2
-git checkout 388448e61825f82185b78d4b8d477b350e48b29c
+work=$(mktemp -d)
+git clone --depth 1 https://github.com/sajik1/node-suite.git "$work/node-suite"
+cd "$work/node-suite"
 sh router/fetch-offline-xray-mips-softfloat-mac.sh
 ```
 
@@ -129,23 +102,10 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 支持 Debian / Ubuntu + systemd。在 VPS SSH 终端执行：
 
 ```bash
-REF='388448e61825f82185b78d4b8d477b350e48b29c'
-RAW="https://raw.githubusercontent.com/sajik1/node-suite/$REF/vps/install-vless-reality-vps.sh"
-API="https://api.github.com/repos/sajik1/node-suite/contents/vps/install-vless-reality-vps.sh?ref=$REF"
-OUT='/root/install-vless-reality-vps.sh'
-
-rm -f "$OUT"
-(
-  curl -4 -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 "$RAW" -o "$OUT" || \
-  curl -fL --connect-timeout 10 --max-time 45 --retry 2 --retry-delay 2 \
-    -H 'Accept: application/vnd.github.raw+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "$API" -o "$OUT"
-) && \
-chmod 700 "$OUT" && \
-bash -n "$OUT" && \
-bash "$OUT"
+curl -fL --retry 2 --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/sajik1/node-suite/main/vps/install-vless-reality-vps.sh -o /root/install-vless-reality-vps.sh && bash /root/install-vless-reality-vps.sh
 ```
+
+VPS 同样只在安装全部完成后删除本次安装脚本，失败/预检保留。
 
 首次安装随机生成 VLESS TCP 入站端口；已有节点默认复用原端口和密钥。云安全组必须放行最终显示的 TCP 端口。
 
@@ -173,6 +133,7 @@ Bot 管理
 - `节点管理 → 添加设备`：获取 Pages 地址和一次性配对码。
 - `当前节点`：只返回一条 Quantumult X 整行配置，并自动加入当前 SNI 对应的 `server_check_url`。
 - `节点配置 → 修改 SNI`：修改后 target 自动同步为 `SNI:443`。
+- `设备详情 → 修改设备名`：控制用户和管理员可改名，最多 48 个 UTF-8 字节，不含逗号或控制字符。云端设备列表、节点配置行和后续通知统一采用新名称，旧心跳不会覆盖。通过现有远控同步本地监控配置、节点文件和 VPS 节点名称，无需重装或重启 Xray；执行结果另行通知。离线超过命令的 5 分钟有效期或执行失败时，上线后重新提交同名即可重试。旧 Telegram 消息和已导入客户端的配置不会被追溯编辑，需重新获取/导入。
 - `实时刷新`：立即请求设备重新上报状态。
 - 节点监听端口、UUID、REALITY 密钥、Short ID 可单独修改。
 
@@ -209,24 +170,17 @@ Bot 管理
 - 已配对设备不需要重新配对。
 - 重新执行节点安装器会优先复用现有身份、端口和密钥。
 - 只有新增设备才生成新的配对码。
-- Cloudflare API 临时失败时，恢复网络后继续使用同一固定提交和同一项目名称重跑。
+- Cloudflare API 临时失败时，恢复网络后继续使用同一项目名称重跑。
 
 ## 7. 节点状态说明
 
-```text
-公网可连接 / 公网入站已验证
-```
-Cloudflare 当前探测点已经连通节点 TCP 端口。
+Cloudflare 向已登记的公网 IPv4/IPv6 和节点 TCP 端口建立连接（例如 38444），成功即显示“公网可连接”。失败重试最多 3 次，每次超时 2.5 秒，仍失败即记录该地址族端口异常；不会保留旧的成功结果，也不再显示“外部探测未确认”。另一地址族正常时仍可通过该路径使用，异常路径会单独列出。
 
-```text
-外部探测未确认
-```
-设备有公网地址且本机监听正常，但 Cloudflare 当前探测点未连通；不代表其它公网客户端一定不可用。
+完整上报、地址/端口变化、手动探测立即检查；普通心跳距上次探测满 5 分钟再次检查。失败会进入设备异常列表、状态汇总和告警，恢复后解除。没有公网地址的地址族显示无地址，不当作端口连接失败。
 
-```text
-本机 TCP 未监听
-```
-节点服务自身没有监听配置端口，需要检查 Xray/服务状态。
+TCP 握手已经包含对端响应，无需向 REALITY 端口发送任意明文。这只确认 CF 到节点端口可达，不代表已完成 VLESS 认证或实际代理上网测试；UDP 隧道支持与公网 TCP 可达性分别展示。实现依据：[Cloudflare TCP sockets](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/)。
+
+自建安装脚本 SHA256 门槛、固定历史提交安装流程及离线二进制自建校验文件已移除。Xray 官方发布包完整性校验、TLS 证书校验、设备认证哈希和运行时变化检测保留，它们不属于自建安装校验码。
 
 ## 8. 本地检查
 

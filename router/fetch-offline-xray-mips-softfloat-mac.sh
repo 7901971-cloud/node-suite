@@ -23,9 +23,8 @@ ACTUAL="$(shasum -a 256 "$FILE" | awk '{print $1}')"
 unzip -p "$FILE" xray_softfloat > home-node-xray
 [ -s home-node-xray ] || { echo '官方压缩包中没有 xray_softfloat'; exit 1; }
 chmod 700 home-node-xray
-shasum -a 256 home-node-xray > home-node-xray.sha256
 printf '路由器 LAN SSH 地址（例如 10.0.0.1）：'
 IFS= read -r ROUTER_IP
 printf '%s' "$ROUTER_IP" | grep -Eq '^[0-9A-Fa-f:.]+$' || { echo '地址格式不正确'; exit 1; }
-scp -O home-node-xray home-node-xray.sha256 "root@${ROUTER_IP}:/tmp/"
-echo '已上传 /tmp/home-node-xray 与 SHA256 文件。路由器安装器会自动优先使用该已校验软浮点二进制。'
+scp -O home-node-xray "root@${ROUTER_IP}:/tmp/"
+echo '已上传 /tmp/home-node-xray 。路由器安装器会自动优先使用该软浮点二进制。'

@@ -1,7 +1,7 @@
 import { connect } from "cloudflare:sockets";
 import { groupUpdate, groupCallback, groupInput, groupMaintenance } from './groups.js';
 
-const VERSION = "3.6.0";
+const VERSION = "3.8.0";
 const PAIR_TTL_SECONDS = 10 * 60;
 const MAX_NODE_BYTES = 12 * 1024;
 const PAGE_SIZE = 8;
@@ -15,6 +15,8 @@ const ALERT_NAMES = {
   load: "系统负载过高",
   ddns: "DuckDNS 更新连续失败",
   no_public_ip: "没有可用公网地址",
+  inbound4: "IPv4 节点端口无法连接",
+  inbound6: "IPv6 节点端口无法连接",
   offline: "设备离线"
 };
 const ALLOWED_ALERTS = new Set(Object.keys(ALERT_NAMES).filter((x) => x !== "offline"));
@@ -478,16 +480,17 @@ async function receiveReport(request, env) {
   const now = nowSeconds();
   const status = statusFromForm(form, request);
   const previousStatus = safeStatus(device.status_json);
-  const currentAlerts = parseAlertCodes(form.get("alerts"));
+  const currentAlerts = parseAlertCodes(form.get("alerts")).filter(x => !["inbound4", "inbound6"].includes(x));
   const previousAlerts = safeArray(device.active_alerts).filter((x) => x !== "offline");
-  const added = currentAlerts.filter((x) => !previousAlerts.includes(x));
-  const resolved = previousAlerts.filter((x) => !currentAlerts.includes(x));
-  const newName = cleanText(form.get("device_name"), 48) || device.name;
+  const newName = device.name; // 名称由 TG 管理，旧心跳不得覆盖。
   const bootId = cleanText(form.get("boot_id"), 80);
   const full = boolValue(form.get("full"));
   const refreshWasRequested = Boolean(device.refresh_requested);
   const addressChanged = status.public4 !== previousStatus.public4 || status.public6 !== previousStatus.public6 || status.ss_port !== previousStatus.ss_port;
-  await updateInboundStatus(status, previousStatus, full || addressChanged);
+  await updateInboundStatus(status, previousStatus, full || addressChanged || now - (previousStatus.probed_at || 0) >= 300);
+  currentAlerts.push(...inboundAlerts(status));
+  const added = currentAlerts.filter(x => !previousAlerts.includes(x));
+  const resolved = previousAlerts.filter(x => !currentAlerts.includes(x));
   let nodeCipher = device.node_cipher;
   let nodeUpdatedAt = device.node_updated_at;
 
@@ -505,10 +508,10 @@ async function receiveReport(request, env) {
 
   try {
     await env.DB.prepare(
-      `UPDATE devices SET name=?,last_seen=?,online_state='online',active_alerts=?,status_json=?,
+      `UPDATE devices SET last_seen=?,online_state='online',active_alerts=?,status_json=?,
        node_cipher=?,node_updated_at=?,boot_id=?,client_ip=?,refresh_requested=? WHERE id=?`
     ).bind(
-      newName, now, JSON.stringify(currentAlerts), JSON.stringify(status), nodeCipher,
+      now, JSON.stringify(currentAlerts), JSON.stringify(status), nodeCipher,
       nodeUpdatedAt, bootId, status.client_ip, full ? 0 : device.refresh_requested, device.id
     ).run();
   } catch (_) {
@@ -891,7 +894,16 @@ async function handleCallback(query, env, access) {
   const id = parts[2];
   if (!/^[a-f0-9]{16}$/.test(id || "")) return;
   if (["cfg", "cfgi", "cfgr", "cfgok"].includes(action)) return nodeEditCallback(query, env, access);
-  if (action === "d") return showDevice(env, chatId, messageId, id, access);
+  if (action === "rename") {
+    if (!can(access, "operator")) return denyMenu(env, chatId, messageId, access);
+    if (!await getDevice(env, id)) return;
+    await savePendingInput(env, query.from.id, "device_rename", {id, chat:String(chatId)});
+    return editMenu(env, chatId, messageId, "请输入新的设备名（最多 48 字节，不含逗号或换行）。发送 /cancel 取消。", deviceButton(id));
+  }
+  if (action === "d") {
+    await env.DB.prepare("DELETE FROM bot_pending_inputs WHERE actor_id=? AND action='device_rename'").bind(String(query.from.id)).run();
+    return showDevice(env, chatId, messageId, id, access);
+  }
   if (action === "status") return showFullStatus(env, chatId, messageId, id, access);
   if (action === "node") return showNode(env, chatId, id);
   if (action === "ssh") return showSsh(env, chatId, id);
@@ -1007,7 +1019,7 @@ async function consumePendingInput(message, env, access) {
   if (!pending) return false;
   const data = safeStatus(pending.data_json);
   if (String(data.chat || '') !== String(message.chat.id)) return false;
-  if (!can(access, pending.action === 'node_input' ? 'operator' : 'admin')) return false;
+  if (!can(access, ['node_input', 'device_rename'].includes(pending.action) ? 'operator' : 'admin')) return false;
   await env.DB.prepare("DELETE FROM bot_pending_inputs WHERE actor_id=? AND data_json=?").bind(actorId, pending.data_json).run();
   if (numberValue(pending.expires_at) < nowSeconds()) {
     await tg(env, "sendMessage", { chat_id: message.chat.id, text: "输入已过期，请在 Bot 设置中重新点选操作。" });
@@ -1016,6 +1028,10 @@ async function consumePendingInput(message, env, access) {
   const input = String(message.text || "").trim();
   if (input.startsWith("/")) return false;
   if (pending.action.startsWith('group_')) return groupInput(message, env, pending.action, data, groupServices);
+  if (pending.action === "device_rename") {
+    await renameDevice(env, message, data.id, input, access);
+    return true;
+  }
   if (pending.action === "node_input") {
     await previewNodeEdit(env, actorId, message.chat.id, null, data.id, data.field, input);
     return true;
@@ -1255,6 +1271,7 @@ async function showDevice(env, chatId, messageId, id, access) {
       ...(can(access, "operator") ? [{ text: "⚙️ 节点配置", callback_data: `rn:cfg:${id}` }] : []),
       { text: muted ? "🔔 解除静音" : "🔕 告警静音", callback_data: `rn:mute:${id}` }
     ]] : []),
+    ...(can(access, "operator") ? [[{ text: "✏️ 修改设备名", callback_data: `rn:rename:${id}` }]] : []),
     ...(can(access, "operator") ? [[{ text: "🗑 移除设备", callback_data: `rn:remove:${id}` }]] : []),
     [{ text: "⬅️ 设备列表", callback_data: "rn:list:0" }, { text: "🏠 主菜单", callback_data: "root" }]
   ];
@@ -1312,7 +1329,10 @@ async function showNode(env, chatId, id) {
   } catch (_) {
     nodeText = "节点信息解密失败，请重新部署相同的数据加密密钥或让设备重新配对。";
   }
-  const entries = extractCopyableNodeEntries(nodeText);
+  const entries = extractCopyableNodeEntries(renameNodeText(nodeText, d.name))
+    .filter((entry) => /^vless=/i.test(entry.value))
+    .slice(0, 1)
+    .map((entry) => ({ ...entry, label: "Quantumult X 整行导入", value: withSniCheckUrl(entry.value) }));
   if (!entries.length) {
     await tg(env, "sendMessage", {
       chat_id: chatId,
@@ -1330,6 +1350,18 @@ async function showNode(env, chatId, id) {
       reply_markup: { inline_keyboard: [[{ text: "🗑 删除", callback_data: "delete:this" }]] }
     });
   }
+}
+
+function withSniCheckUrl(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/(?:^|,\s*)obfs-host=([^,\s]+)/i);
+  if (!/^vless=/i.test(text) || !match) return text;
+  const host = match[1].trim();
+  if (!/^([a-z\d]([a-z\d-]*[a-z\d])?\.)+[a-z]{2,63}$/i.test(host)) return text;
+  const field = `server_check_url=http://${host}/generate_204`;
+  if (/(?:^|,\s*)server_check_url=/i.test(text)) return text.replace(/,\s*server_check_url=[^,]+/i, `, ${field}`);
+  if (/,\s*tag=/i.test(text)) return text.replace(/,\s*tag=/i, `, ${field}, tag=`);
+  return `${text}, ${field}`;
 }
 
 function extractCopyableNodeEntries(nodeText) {
@@ -1377,11 +1409,18 @@ async function showProbe(env, chatId, messageId, id, access) {
   s.inbound4 = isPublicIPv4(s.public4) ? (results.find(([label]) => label === "IPv4")?.[1] ? "reachable" : "blocked") : "none";
   s.inbound6 = isPublicIPv6(s.public6) ? (results.find(([label]) => label === "IPv6")?.[1] ? "reachable" : "blocked") : "none";
   s.network_type = detectedNetworkType(s);
-  await env.DB.prepare("UPDATE devices SET status_json=? WHERE id=? AND enabled=1").bind(JSON.stringify(s), id).run();
+  s.probed_at = nowSeconds();
+  const alerts = safeArray(d.active_alerts).filter(x => !["inbound4", "inbound6"].includes(x)).concat(inboundAlerts(s));
+  await env.DB.prepare("UPDATE devices SET status_json=?,active_alerts=? WHERE id=? AND enabled=1").bind(JSON.stringify(s), JSON.stringify(alerts), id).run();
+  for (const code of ["inbound4", "inbound6"]) {
+    if (alerts.includes(code)) await activateAlert(env, id, code, nowSeconds(), false);
+    else await resolveAlert(env, id, code, nowSeconds());
+  }
   const lines = results.length
     ? results.map(([label, ok]) => `${label} TCP ${port}：${ok ? "✅ 可连接" : "❌ 无法连接"}`)
     : ["没有可用于外部探测的公网地址。"];
-  lines.push(isVps
+  lines.push("说明：按 Cloudflare 到节点端口的 TCP 连接结果判断；不等同于完整代理上网测试。");
+  lines.push(isVps || s.udp_mode === "vless-tunnel"
     ? "VLESS 的 UDP 通过 XUDP 封装在 TCP 内，不需要服务器单独监听 UDP 端口。"
     : "UDP只能确认路由器本地监听，Cloudflare不执行UDP外部探测。");
   return editMenu(env, chatId, messageId, `<b>🌐 ${escapeHtml(d.name)} · 外部探测</b>\n\n${lines.join("\n")}`, {
@@ -1392,21 +1431,21 @@ async function showProbe(env, chatId, messageId, id, access) {
   });
 }
 
-async function probeTcp(host, port) {
+async function probeTcp(host, port, attempts = 3) {
   if (!host || port < 1 || port > 65535) return false;
-  let socket;
-  try {
-    socket = connect({ hostname: host, port }, { secureTransport: "off" });
-    await Promise.race([
-      socket.opened,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3500))
-    ]);
-    return true;
-  } catch (_) {
-    return false;
-  } finally {
-    try { socket?.close(); } catch (_) {}
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let socket, timer;
+    try {
+      socket = connect({ hostname: host, port }, { secureTransport: "off" });
+      socket.closed.catch(() => {});
+      await Promise.race([socket.opened, new Promise((_, reject) => timer = setTimeout(() => reject(new Error("timeout")), 2500))]);
+      return true;
+    } catch (_) {
+      // Retry transient connection errors before declaring this path unavailable.
+    } finally { clearTimeout(timer); try { socket?.close().catch(() => {}); } catch (_) {} }
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 150));
   }
+  return false;
 }
 
 function isPublicIPv4(value) {
@@ -1426,17 +1465,22 @@ function isPublicIPv6(value) {
     !s.startsWith("fea") && !s.startsWith("feb") && !s.startsWith("fc") && !s.startsWith("fd");
 }
 
-function inboundStateText(value) {
-  return value === "reachable" ? "✅ 公网可连接" : value === "blocked" ? "❌ TCP 入站未通过" : value === "none" ? "无公网地址" : "等待外部检测";
+function inboundAlerts(status) {
+  return ["inbound4", "inbound6"].filter(key => status[key] === "blocked");
 }
+
+function inboundStateText(value) {
+  return value === "reachable" ? "✅ 公网可连接" : value === "blocked" ? "❌ 节点 TCP 端口无法连接" : value === "none" ? "无公网地址" : "等待外部检测";
+}
+
 
 function detectedNetworkType(status) {
   const has4 = isPublicIPv4(status.public4);
   const has6 = isPublicIPv6(status.public6);
   const ok4 = status.inbound4 === "reachable";
   const ok6 = status.inbound6 === "reachable";
-  const state4 = has4 ? (ok4 ? "公网入站已验证" : status.inbound4 === "blocked" ? "TCP 入站未通过" : "等待外部检测") : "上级 NAT 或未确认";
-  const state6 = has6 ? (ok6 ? "公网入站已验证" : status.inbound6 === "blocked" ? "TCP 入站未通过" : "等待外部检测") : "无公网地址";
+  const state4 = has4 ? (ok4 ? "公网入站已验证" : status.inbound4 === "blocked" ? "节点 TCP 端口无法连接" : "等待外部检测") : "上级 NAT 或未确认";
+  const state6 = has6 ? (ok6 ? "公网入站已验证" : status.inbound6 === "blocked" ? "节点 TCP 端口无法连接" : "等待外部检测") : "无公网地址";
   if (has4 && has6) return `双栈：IPv4（${state4}）；IPv6（${state6}）`;
   if (has6) return `IPv6（${state6}）；IPv4 为上级 NAT 或未确认`;
   if (has4) return `IPv4（${state4}）；IPv6 无公网地址`;
@@ -1445,13 +1489,18 @@ function detectedNetworkType(status) {
 
 async function updateInboundStatus(status, previous = {}, force = false) {
   const port = numberValue(status.ss_port);
-  status.inbound4 = isPublicIPv4(status.public4) ? (previous.inbound4 || "pending") : "none";
-  status.inbound6 = isPublicIPv6(status.public6) ? (previous.inbound6 || "pending") : "none";
+  const previousPort = numberValue(previous.ss_port);
+  status.probed_at = previous.probed_at || 0;
+  const previous4 = status.public4 === previous.public4 && port === previousPort && previous.inbound4 !== "unverified" ? previous.inbound4 : "";
+  const previous6 = status.public6 === previous.public6 && port === previousPort && previous.inbound6 !== "unverified" ? previous.inbound6 : "";
+  status.inbound4 = isPublicIPv4(status.public4) ? (previous4 || "pending") : "none";
+  status.inbound6 = isPublicIPv6(status.public6) ? (previous6 || "pending") : "none";
   if (force && port > 0 && port <= 65535) {
     const checks = [];
     if (isPublicIPv4(status.public4)) checks.push(probeTcp(status.public4, port).then((ok) => { status.inbound4 = ok ? "reachable" : "blocked"; }));
     if (isPublicIPv6(status.public6)) checks.push(probeTcp(status.public6, port).then((ok) => { status.inbound6 = ok ? "reachable" : "blocked"; }));
     await Promise.all(checks);
+    status.probed_at = nowSeconds();
   }
   status.network_type = detectedNetworkType(status);
   return status;
@@ -1761,7 +1810,7 @@ function appendLinesWithinTelegramLimit(header, lines, limit = 3900) {
   return text.trimEnd();
 }
 
-const NODE_FIELDS = { sni: 'SNI', target: 'REALITY 目标', port: '节点端口', uuid: 'UUID', keys: 'REALITY 密钥', shortid: 'Short ID' };
+const NODE_FIELDS = { sni: '修改 SNI', target: 'REALITY 目标', port: '节点端口', uuid: 'UUID', keys: 'REALITY 密钥', shortid: 'Short ID' };
 function validNodeValue(field, value) {
   if (typeof value !== 'string' || value.length > 300 || /[\r\n\x00-\x1f]/.test(value)) return false;
   if (['keys', 'uuid', 'shortid'].includes(field) && value === 'random') return true;
@@ -1787,7 +1836,7 @@ async function nodeEditCallback(query, env, access) {
     await env.DB.prepare('DELETE FROM node_config_drafts WHERE actor_id=?').bind(String(query.from.id)).run();
     await env.DB.prepare("DELETE FROM bot_pending_inputs WHERE actor_id=? AND action LIKE 'node_%'").bind(String(query.from.id)).run();
     return editMenu(env, chatId, mid, `<b>⚙️ ${escapeHtml(d.name)} · 节点配置</b>`, { inline_keyboard: [
-      [{text:'更换 SNI',callback_data:`rn:cfgi:${id}:sni`},{text:'更换目标',callback_data:`rn:cfgi:${id}:target`}],
+      [{text:'修改 SNI',callback_data:`rn:cfgi:${id}:sni`}],
       [{text:'更换端口',callback_data:`rn:cfgi:${id}:port`},{text:'更换 UUID',callback_data:`rn:cfgi:${id}:uuid`}],
       [{text:'生成新密钥',callback_data:`rn:cfgr:${id}:keys`},{text:'更换 Short ID',callback_data:`rn:cfgi:${id}:shortid`}],
       [{text:'⬅️ 返回设备',callback_data:`rn:d:${id}`}]
@@ -1805,7 +1854,7 @@ async function nodeEditCallback(query, env, access) {
   if (action === 'cfgr' && field === 'keys') return previewNodeEdit(env,query.from.id,chatId,mid,id,field,'random');
   if (action === 'cfgi') {
     await savePendingInput(env, query.from.id, 'node_input', {id,field,chat:String(chatId)});
-    const hint = field === 'sni' ? '请输入域名（目标同步为该域名:443）。' : field === 'target' ? '请输入域名:端口（保留 SNI）。' : field === 'port' ? '请输入端口 1–65535。' : '请输入新值，或发送 random 随机生成。';
+    const hint = field === 'sni' ? '请输入域名。' : field === 'target' ? '请输入域名:端口（保留 SNI）。' : field === 'port' ? '请输入端口 1–65535。' : '请输入新值，或发送 random 随机生成。';
     return editMenu(env,chatId,mid,`<b>${NODE_FIELDS[field]}</b>\n${hint}`,{inline_keyboard:[[{text:'取消',callback_data:`rn:cfg:${id}`}]]});
   }
 }
@@ -1820,4 +1869,87 @@ async function previewNodeEdit(env, actorId, chatId, mid, id, field, value) {
   const keyboard={inline_keyboard:[[{text:'确认修改',callback_data:`rn:cfgok:${id}:${nonce}`}],[{text:'取消',callback_data:`rn:cfg:${id}`}]]};
   if(mid) return editMenu(env,chatId,mid,text,keyboard);
   return tg(env,'sendMessage',{chat_id:chatId,text,parse_mode:'HTML',reply_markup:keyboard});
+}
+
+function validDeviceName(name) {
+  return typeof name === 'string' && name.trim() === name && name.length > 0 &&
+    new TextEncoder().encode(name).length <= 48 && !/[,\x00-\x1f\x7f]/.test(name);
+}
+
+function renameNodeText(text, name) {
+  return String(text || '').split('\n').map(line => {
+    if (/^\s*(vless|shadowsocks|ss)=/i.test(line)) return line.replace(/(,\s*tag=)[^,\r\n]*/i, (_, prefix) => prefix + name);
+    if (/^\s*(vless|ss):\/\/\S+/i.test(line)) return line.replace(/#.*$/, '') + '#' + encodeURIComponent(name);
+    return line;
+  }).join('\n');
+}
+
+function renameDeviceScript(name) {
+  // Only a base64 literal enters shell source; the decoded name is never evaluated.
+  const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(name)));
+  return String.raw`set -eu
+umask 077
+exec 6>/tmp/node-config.flock
+flock -n 6 || { echo '配置修改忙，请重试改名'; exit 1; }
+[ ! -d /tmp/home-suite-install.lock ] || exit 1
+mkdir -p /run/lock
+exec 5>/run/lock/install-vless-reality.lock
+flock -n 5 || exit 1
+suite_dir=/etc/vless-reality
+suite_node=/root/vless-node-info.txt
+suite_monitor=/usr/local/sbin/vless-reality-monitor
+if [ -r /etc/openwrt_release ]; then
+  suite_dir=/etc/home-ss
+  suite_node=/root/home-ss-node.txt
+  suite_monitor=/usr/bin/home-monitor
+fi
+suite_b64='${encoded}'
+suite_name=$(printf '%s' "$suite_b64" | base64 -d)
+suite_tmp=$(mktemp -d "$suite_dir/rename.XXXXXX")
+suite_done=0
+suite_changed=0
+trap 'suite_rc=$?; if [ "$suite_done" = 0 ] && [ "$suite_changed" = 1 ]; then cp -p "$suite_tmp/monitor.old" "$suite_dir/monitor.conf"; cp -p "$suite_tmp/settings.old" "$suite_dir/settings.conf"; cp -p "$suite_tmp/node.old" "$suite_node"; fi; rm -rf "$suite_tmp"; exit "$suite_rc"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cp -p "$suite_dir/monitor.conf" "$suite_tmp/monitor.old"
+cp -p "$suite_dir/settings.conf" "$suite_tmp/settings.old"
+cp -p "$suite_node" "$suite_tmp/node.old"
+for suite_file in monitor settings; do
+  awk '!/^(DEVICE_NAME_B64|NODE_NAME_B64)=/' "$suite_tmp/$suite_file.old" > "$suite_tmp/$suite_file.new"
+  printf "DEVICE_NAME_B64='%s'\nNODE_NAME_B64='%s'\n" "$suite_b64" "$suite_b64" >> "$suite_tmp/$suite_file.new"
+  sh -n "$suite_tmp/$suite_file.new"
+done
+jq -Rrs --arg name "$suite_name" 'split("\n") | map(if test("^\\s*(vless|shadowsocks|ss)=") then sub(",\\s*tag=[^,\\r\\n]*"; ", tag=" + $name) elif test("^\\s*(vless|ss)://\\S+") then sub("#.*$"; "") + "#" + ($name|@uri) else . end) | join("\n")' "$suite_node" > "$suite_tmp/node.new"
+suite_changed=1
+mv "$suite_tmp/monitor.new" "$suite_dir/monitor.conf"
+mv "$suite_tmp/settings.new" "$suite_dir/settings.conf"
+mv "$suite_tmp/node.new" "$suite_node"
+suite_done=1
+flock -u 6
+flock -u 5
+"$suite_monitor" --full >/dev/null 2>&1 || true
+printf '设备本地名称和节点名称已同步：%s\n' "$suite_name"`;
+}
+
+async function renameDevice(env, message, id, name, access) {
+  if (!can(access, 'operator')) return;
+  const reply = text => tg(env, 'sendMessage', {chat_id:message.chat.id, text, reply_markup:deviceButton(id)});
+  if (!validDeviceName(name)) return reply('名称不能为空、超过 48 字节，或含逗号/控制字符。请重新点击修改设备名。');
+  const device = await getDevice(env, id);
+  if (!device) return reply('设备不存在。');
+  const busy = await env.DB.prepare("SELECT COUNT(*) c FROM device_commands WHERE device_id=? AND status IN ('queued','running') AND expires_at>=?").bind(id, nowSeconds()).first();
+  if (busy?.c) return reply('设备还有命令等待完成，请完成后再改名。');
+  const now = nowSeconds();
+  const payload = await encryptText(renameDeviceScript(name), env);
+  try {
+    await env.DB.batch([
+      env.DB.prepare('UPDATE devices SET name=?,refresh_requested=1 WHERE id=? AND enabled=1').bind(name, id),
+      env.DB.prepare("INSERT INTO device_commands(id,device_id,action,payload,status,requested_by,created_at,expires_at) VALUES(?,?,'shell',?,'queued',?,?,?)")
+        .bind(randomHex(12), id, payload, JSON.stringify({user:String(message.from.id),chat:String(message.chat.id)}), now, now + 300)
+    ]);
+  } catch (error) {
+    if (/UNIQUE|constraint/i.test(String(error))) return reply('设备名已被使用，请换一个名称。');
+    throw error;
+  }
+  return reply(`云端设备名及当前节点名称已更新为：${name}\n本地同步已排队，执行结果会另行通知。离线超过 5 分钟或执行失败时，请上线后再次提交同一名称重试。已导入客户端的节点需重新导入。`);
 }

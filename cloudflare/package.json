@@ -1,16 +1,14 @@
 {
   "name": "node-center-cloudflare-tgbot",
-  "version": "3.6.0",
+  "version": "3.8.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "prepare:runtime": "node apply-index-patch.mjs",
-    "postinstall": "node apply-index-patch.mjs",
-    "deploy": "npm run prepare:runtime && wrangler deploy",
+    "deploy": "wrangler deploy",
     "deploy:pages": "bash deploy-pages-gateway.sh",
-    "dev": "npm run prepare:runtime && wrangler dev",
-    "check": "npm run prepare:runtime && node --check src/index.js && node --check src/groups.js && node --check 'pages-gateway/functions/[[path]].js'",
-    "test": "npm run prepare:runtime && node --test tests/*.test.mjs"
+    "dev": "wrangler dev",
+    "check": "node --check src/index.js && node --check src/groups.js && node --check 'pages-gateway/functions/[[path]].js'",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "wrangler": "4.129.0"
