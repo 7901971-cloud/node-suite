@@ -29,13 +29,14 @@ test('TCP success, retries, recovery and changed endpoints use current result',a
   await bot.updateInboundStatus(changed,status,false);assert.equal(changed.inbound4,'pending');
 });
 
-test('dual-stack device is abnormal only when every public path is blocked',()=>{
+test('IPv6-only failure is informational while confirmed IPv4 failure can alert',()=>{
   const status={public4:'8.8.8.8',public6:'2606:4700:4700::1111'};
   assert.deepEqual(bot.inboundAlerts({...status,inbound4:'reachable',inbound6:'blocked'}),[]);
   assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'reachable'}),[]);
   assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'pending'}),[]);
-  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'blocked'}),['inbound4','inbound6']);
-  assert.deepEqual(bot.inboundAlerts({public6:status.public6,inbound6:'blocked'}),['inbound6']);
+  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'blocked'}),['inbound4']);
+  assert.deepEqual(bot.inboundAlerts({public6:status.public6,inbound6:'blocked'}),[]);
+  assert.deepEqual(bot.inboundAlerts({public4:status.public4,inbound4:'blocked'}),['inbound4']);
 });
 
 test('rename shell synchronizes router and VPS files without evaluating name',()=>{

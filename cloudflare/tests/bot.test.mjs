@@ -227,7 +227,7 @@ test('node names preserve connection parameters and reject malformed names',()=>
   assert.equal(bot.renameNodeText('vless=host:38444, password=uuid, tag=old\nvless://uuid@host:38444?security=reality#old',name),`vless=host:38444, password=uuid, tag=${name}\nvless://uuid@host:38444?security=reality#${encodeURIComponent(name)}`);
 });
 
-test('failed probe replaces previous success and appears in abnormal device state',async()=>{
+test('failed IPv4 probe remains an alert when no other public path works',async()=>{
   const f=await base(),id='aaaaaaaaaaaaaaaa';
   const status={public4:'8.8.8.8',ss_port:38444,tcp_listen:true,inbound4:'reachable'};
   f.db.prepare("INSERT INTO devices(id,name,token_hash,created_at,status_json,last_seen) VALUES(?,?,?,1,?,?)").run(id,'probe','hash',JSON.stringify(status),Math.floor(Date.now()/1000));
@@ -236,4 +236,15 @@ test('failed probe replaces previous success and appears in abnormal device stat
   assert.equal(JSON.parse(device.status_json).inbound4,'blocked');
   assert.deepEqual(JSON.parse(device.active_alerts),['inbound4']);
   assert.equal(f.db.prepare("SELECT active FROM alerts WHERE code='inbound4'").get().active,1);
+});
+
+test('failed IPv6-only Cloudflare probe is informational for a healthy device',async()=>{
+  const f=await base(),id='aaaaaaaaaaaaaaaa';
+  const status={public6:'2606:4700:4700::1111',ss_port:38444,tcp_listen:true,inbound6:'reachable'};
+  f.db.prepare("INSERT INTO devices(id,name,token_hash,created_at,status_json,last_seen,active_alerts) VALUES(?,?,?,1,?,?,?)").run(id,'probe6','hash',JSON.stringify(status),Math.floor(Date.now()/1000),JSON.stringify(['inbound6']));
+  await bot.showProbe(f.env,OP,1,id,await f.access(OP));
+  const device=f.db.prepare('SELECT * FROM devices').get();
+  assert.equal(JSON.parse(device.status_json).inbound6,'blocked');
+  assert.deepEqual(JSON.parse(device.active_alerts),[]);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM alerts WHERE code='inbound6' AND active=1").get().n,0);
 });

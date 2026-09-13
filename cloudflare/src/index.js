@@ -1,7 +1,7 @@
 import { connect } from "cloudflare:sockets";
 import { groupUpdate, groupCallback, groupInput, groupMaintenance } from './groups.js';
 
-const VERSION = "3.8.1";
+const VERSION = "3.8.2";
 const PAIR_TTL_SECONDS = 10 * 60;
 const MAX_NODE_BYTES = 12 * 1024;
 const PAGE_SIZE = 8;
@@ -16,7 +16,7 @@ const ALERT_NAMES = {
   ddns: "DuckDNS 更新连续失败",
   no_public_ip: "没有可用公网地址",
   inbound4: "IPv4 节点端口无法连接",
-  inbound6: "IPv6 节点端口无法连接",
+  inbound6: "Cloudflare IPv6 探测未连通",
   offline: "设备离线"
 };
 const ALLOWED_ALERTS = new Set(Object.keys(ALERT_NAMES).filter((x) => x !== "offline"));
@@ -491,6 +491,7 @@ async function receiveReport(request, env) {
   currentAlerts.push(...inboundAlerts(status));
   const added = currentAlerts.filter(x => !previousAlerts.includes(x));
   const resolved = previousAlerts.filter(x => !currentAlerts.includes(x));
+  const resolvedForNotification = resolved.filter(x => x !== "inbound6");
   let nodeCipher = device.node_cipher;
   let nodeUpdatedAt = device.node_updated_at;
 
@@ -543,8 +544,8 @@ async function receiveReport(request, env) {
       for (const code of added) await markAlertNotified(env, device.id, code, now);
     }
   }
-  if (resolved.length && !isMuted(device, now)) {
-    await notifyOwners(env, formatAlertMessage(newName, resolved, status, true), deviceButton(device.id));
+  if (resolvedForNotification.length && !isMuted(device, now)) {
+    await notifyOwners(env, formatAlertMessage(newName, resolvedForNotification, status, true), deviceButton(device.id));
   }
   if (status.auto_restarted && !previousStatus.auto_restarted && !isMuted(device, now)) {
     await notifyOwners(
@@ -1296,8 +1297,8 @@ async function showFullStatus(env, chatId, messageId, id, access) {
     `内存：${formatMB(s.mem_available_kb)} 可用 / ${formatMB(s.mem_total_kb)} 总计，已用 ${s.mem_used_pct || 0}%\n` +
     `温度：${temp}${s.temperature_source ? `（${escapeHtml(s.temperature_source)}）` : ""}\n${isVps ? "根分区" : "Overlay"}：已用 ${s.overlay_used_pct || 0}%\n\n` +
     `<b>网络</b>\n类型：${escapeHtml(s.network_type || "未知")}\n接口：${escapeHtml(s.wan_if || "无")} / ${escapeHtml(s.wan_dev || "无")}\n` +
-    `公网IPv4：<code>${escapeHtml(s.public4 || "无")}</code> · ${inboundStateText(s.inbound4)}\n` +
-    `公网IPv6：<code>${escapeHtml(s.public6 || "无")}</code> · ${inboundStateText(s.inbound6)}\n` +
+    `公网IPv4：<code>${escapeHtml(s.public4 || "无")}</code> · ${inboundStateText(s.inbound4, "IPv4")}\n` +
+    `公网IPv6：<code>${escapeHtml(s.public6 || "无")}</code> · ${inboundStateText(s.inbound6, "IPv6")}\n` +
     `${isVps ? "" : `DDNS：<code>${escapeHtml(s.ddns_domain || "无")}</code>（${escapeHtml(s.ddns_mode || "无")}）\n`}` +
     `WAN收发：${formatBytes(s.wan_rx_bytes)} / ${formatBytes(s.wan_tx_bytes)}\n\n` +
     `<b>服务</b>\n${escapeHtml(s.service_name || (isVps ? "Xray" : "sing-box"))}：${s.singbox_running ? "✅" : "❌"}\n` +
@@ -1417,9 +1418,9 @@ async function showProbe(env, chatId, messageId, id, access) {
     else await resolveAlert(env, id, code, nowSeconds());
   }
   const lines = results.length
-    ? results.map(([label, ok]) => `${label} TCP ${port}：${ok ? "✅ 可连接" : "❌ 无法连接"}`)
+    ? results.map(([label, ok]) => `${label} TCP ${port}：${ok ? "✅ Cloudflare 可连接" : label === "IPv6" ? "⚠️ Cloudflare 当前出口未连通（不作为节点故障）" : "❌ Cloudflare 无法连接"}`)
     : ["没有可用于外部探测的公网地址。"];
-  lines.push("说明：按 Cloudflare 到节点端口的 TCP 连接及探测字节写入结果判断；不等同于完整代理上网测试。");
+  lines.push("说明：IPv6 探测失败只代表当前 Cloudflare 出口到该地址的路径未连通，不作为节点异常；设备心跳、Xray 进程和本机 TCP 监听正常时，IPv6 路由节点保持绿色。");
   lines.push(isVps || s.udp_mode === "vless-tunnel"
     ? "VLESS 的 UDP 通过 XUDP 封装在 TCP 内，不需要服务器单独监听 UDP 端口。"
     : "UDP只能确认路由器本地监听，Cloudflare不执行UDP外部探测。");
@@ -1482,13 +1483,14 @@ function inboundAlerts(status) {
   const paths = [];
   if (isPublicIPv4(status.public4)) paths.push(["inbound4", status.inbound4]);
   if (isPublicIPv6(status.public6)) paths.push(["inbound6", status.inbound6]);
-  if (!paths.length || paths.some(([, state]) => state === "reachable")) return [];
-  if (!paths.every(([, state]) => state === "blocked")) return [];
-  return paths.map(([key]) => key);
+  if (!paths.length || paths.some(([, state]) => state !== "blocked")) return [];
+  // Cloudflare IPv6 egress is not a reliable verdict for China residential IPv6.
+  // A failed IPv6-only probe remains informational; a confirmed IPv4 failure can alert.
+  return paths.some(([key]) => key === "inbound4") ? ["inbound4"] : [];
 }
 
-function inboundStateText(value) {
-  return value === "reachable" ? "✅ 公网可连接" : value === "blocked" ? "❌ 节点 TCP 端口无法连接" : value === "none" ? "无公网地址" : "等待外部检测";
+function inboundStateText(value, family) {
+  return value === "reachable" ? "✅ Cloudflare 可连接" : value === "blocked" ? (family === "IPv6" ? "⚠️ Cloudflare 当前出口未连通（不作为节点故障）" : "❌ Cloudflare 无法连接") : value === "none" ? "无公网地址" : "等待外部检测";
 }
 
 
@@ -1498,7 +1500,7 @@ function detectedNetworkType(status) {
   const ok4 = status.inbound4 === "reachable";
   const ok6 = status.inbound6 === "reachable";
   const state4 = has4 ? (ok4 ? "公网入站已验证" : status.inbound4 === "blocked" ? "节点 TCP 端口无法连接" : "等待外部检测") : "上级 NAT 或未确认";
-  const state6 = has6 ? (ok6 ? "公网入站已验证" : status.inbound6 === "blocked" ? "节点 TCP 端口无法连接" : "等待外部检测") : "无公网地址";
+  const state6 = has6 ? (ok6 ? "公网入站已验证" : status.inbound6 === "blocked" ? "Cloudflare IPv6 出口未连通；不作为节点故障" : "等待外部检测") : "无公网地址";
   if (has4 && has6) return `双栈：IPv4（${state4}）；IPv6（${state6}）`;
   if (has6) return `IPv6（${state6}）；IPv4 为上级 NAT 或未确认`;
   if (has4) return `IPv4（${state4}）；IPv6 无公网地址`;
