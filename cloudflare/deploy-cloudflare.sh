@@ -215,7 +215,7 @@ WEBHOOK_SECRET="$(printf 'node-suite-webhook-v1:%s' "$BOT_TOKEN" | openssl dgst 
 printf '%s' "$WEBHOOK_SECRET" | grep -Eq '^[a-f0-9]{64}$' || die '无法生成稳定的 Telegram Webhook Secret'
 
 SECRET_LIST=''
-if ! retry_capture SECRET_LIST '读取 Worker Secret 列表' npx wrangler secret list --json; then
+if ! retry_capture SECRET_LIST '读取 Worker Secret 列表' npx wrangler secret list --format json; then
   if printf '%s' "$SECRET_LIST" | grep -Eqi 'worker.*not.*found|script.*not.*found|does not exist|10007'; then
     SECRET_LIST='[]'
     say '尚未发现已部署 Worker，将按首次部署生成数据加密密钥。'
