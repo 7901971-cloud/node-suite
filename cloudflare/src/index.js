@@ -1,7 +1,7 @@
 import { connect } from "cloudflare:sockets";
 import { groupUpdate, groupCallback, groupInput, groupMaintenance } from './groups.js';
 
-const VERSION = "3.8.0";
+const VERSION = "3.8.1";
 const PAIR_TTL_SECONDS = 10 * 60;
 const MAX_NODE_BYTES = 12 * 1024;
 const PAGE_SIZE = 8;
@@ -1419,7 +1419,7 @@ async function showProbe(env, chatId, messageId, id, access) {
   const lines = results.length
     ? results.map(([label, ok]) => `${label} TCP ${port}：${ok ? "✅ 可连接" : "❌ 无法连接"}`)
     : ["没有可用于外部探测的公网地址。"];
-  lines.push("说明：按 Cloudflare 到节点端口的 TCP 连接结果判断；不等同于完整代理上网测试。");
+  lines.push("说明：按 Cloudflare 到节点端口的 TCP 连接及探测字节写入结果判断；不等同于完整代理上网测试。");
   lines.push(isVps || s.udp_mode === "vless-tunnel"
     ? "VLESS 的 UDP 通过 XUDP 封装在 TCP 内，不需要服务器单独监听 UDP 端口。"
     : "UDP只能确认路由器本地监听，Cloudflare不执行UDP外部探测。");
@@ -1434,15 +1434,28 @@ async function showProbe(env, chatId, messageId, id, access) {
 async function probeTcp(host, port, attempts = 3) {
   if (!host || port < 1 || port > 65535) return false;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    let socket, timer;
+    let socket, writer, timer;
     try {
       socket = connect({ hostname: host, port }, { secureTransport: "off" });
       socket.closed.catch(() => {});
-      await Promise.race([socket.opened, new Promise((_, reject) => timer = setTimeout(() => reject(new Error("timeout")), 2500))]);
+      writer = socket.writable.getWriter();
+      const openedAndWritten = (async () => {
+        await socket.opened;
+        await writer.write(new Uint8Array([0x16]));
+      })();
+      openedAndWritten.catch(() => {});
+      await Promise.race([
+        openedAndWritten,
+        new Promise((_, reject) => timer = setTimeout(() => reject(new Error("timeout")), 4000))
+      ]);
       return true;
     } catch (_) {
       // Retry transient connection errors before declaring this path unavailable.
-    } finally { clearTimeout(timer); try { socket?.close().catch(() => {}); } catch (_) {} }
+    } finally {
+      clearTimeout(timer);
+      try { writer?.releaseLock(); } catch (_) {}
+      try { await socket?.close(); } catch (_) {}
+    }
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 150));
   }
   return false;
@@ -1466,7 +1479,12 @@ function isPublicIPv6(value) {
 }
 
 function inboundAlerts(status) {
-  return ["inbound4", "inbound6"].filter(key => status[key] === "blocked");
+  const paths = [];
+  if (isPublicIPv4(status.public4)) paths.push(["inbound4", status.inbound4]);
+  if (isPublicIPv6(status.public6)) paths.push(["inbound6", status.inbound6]);
+  if (!paths.length || paths.some(([, state]) => state === "reachable")) return [];
+  if (!paths.every(([, state]) => state === "blocked")) return [];
+  return paths.map(([key]) => key);
 }
 
 function inboundStateText(value) {

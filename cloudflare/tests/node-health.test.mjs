@@ -11,14 +11,31 @@ source+='\nexport {probeTcp,updateInboundStatus,inboundAlerts,renameDeviceScript
 const bot=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 test('TCP success, retries, recovery and changed endpoints use current result',async()=>{
-  let calls=0,closed=0;
-  globalThis.testConnect=()=>{calls++;return {opened: calls<3?Promise.reject(Error('refused')):Promise.resolve({}),closed:Promise.resolve(),close(){closed++;return Promise.resolve();}};};
-  assert.equal(await bot.probeTcp('8.8.8.8',38444),true);assert.equal(calls,3);assert.equal(closed,3);
+  let calls=0,closed=0,writes=0;
+  globalThis.testConnect=()=>{
+    const current=++calls;
+    return {
+      opened:current===1?Promise.reject(Error('refused')):Promise.resolve({}),
+      closed:Promise.resolve(),
+      writable:{getWriter(){return {write(chunk){writes++;assert.deepEqual([...chunk],[0x16]);return current===2?Promise.reject(Error('write failed')):Promise.resolve();},releaseLock(){}};}},
+      close(){closed++;return Promise.resolve();}
+    };
+  };
+  assert.equal(await bot.probeTcp('8.8.8.8',38444),true);assert.equal(calls,3);assert.equal(writes,2);assert.equal(closed,3);
   const status={public4:'8.8.8.8',public6:'2606:4700:4700::1111',ss_port:38444};
   await bot.updateInboundStatus(status,{...status,inbound4:'blocked',inbound6:'blocked'},true);
   assert.equal(status.inbound4,'reachable');assert.equal(status.inbound6,'reachable');assert.deepEqual(bot.inboundAlerts(status),[]);
   const changed={...status,ss_port:40000};
   await bot.updateInboundStatus(changed,status,false);assert.equal(changed.inbound4,'pending');
+});
+
+test('dual-stack device is abnormal only when every public path is blocked',()=>{
+  const status={public4:'8.8.8.8',public6:'2606:4700:4700::1111'};
+  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'reachable',inbound6:'blocked'}),[]);
+  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'reachable'}),[]);
+  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'pending'}),[]);
+  assert.deepEqual(bot.inboundAlerts({...status,inbound4:'blocked',inbound6:'blocked'}),['inbound4','inbound6']);
+  assert.deepEqual(bot.inboundAlerts({public6:status.public6,inbound6:'blocked'}),['inbound6']);
 });
 
 test('rename shell synchronizes router and VPS files without evaluating name',()=>{
