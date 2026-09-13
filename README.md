@@ -73,15 +73,32 @@ curl -sS --noproxy '*' 'https://你的Pages项目.pages.dev/health'
 
 ## 3. 安装或升级路由器节点
 
-在 OpenWrt/Kwrt SSH 终端执行：
+在 OpenWrt/Kwrt SSH 终端执行。入口默认先从 GitHub Raw 下载；如果 Raw 的 DNS、TLS 或网络访问失败，会自动切换 jsDelivr。两边都失败才停止本次安装：
 
 ```sh
-curl -fL --retry 2 --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/sajik1/node-suite/main/router/install-router-complete.sh -o /tmp/install-router-complete.sh && sh /tmp/install-router-complete.sh
+(
+OUT=/tmp/install-router-complete.sh
+RAW=https://raw.githubusercontent.com/sajik1/node-suite/main/router/install-router-complete.sh
+CDN=https://cdn.jsdelivr.net/gh/sajik1/node-suite@main/router/install-router-complete.sh
+rm -f "$OUT"
+if curl -fL --retry 2 --connect-timeout 10 --max-time 120 "$RAW" -o "$OUT"; then
+    echo '安装器下载源：GitHub Raw'
+else
+    echo 'GitHub Raw 下载失败，自动切换 jsDelivr...'
+    curl -fL --retry 2 --connect-timeout 10 --max-time 120 "$CDN" -o "$OUT" || {
+        rm -f "$OUT"
+        echo '错误：GitHub Raw 与 jsDelivr 均下载失败，本次安装停止。' >&2
+        exit 1
+    }
+    echo '安装器下载源：jsDelivr'
+fi
+sh "$OUT"
+)
 ```
 
 安装器会优先复用现有设备身份、节点端口和密钥，不会主动接管无关 SSH/代理配置。已有 sing-box/SS 备用节点不会在新 VLESS 验收前自动删除。
 
-安装全部完成后自动删除本次运行的安装脚本；失败、中断、`--preflight` 和 `--version` 不删除。已安装服务、配置和备份保留。若 GitHub Raw 无法访问，可在 Mac 克隆仓库后用 scp 上传对应脚本执行。
+安装全部完成后自动删除本次运行的安装脚本；失败、中断、`--preflight` 和 `--version` 不删除。已安装服务、配置和备份保留。GitHub Raw 不可用时入口会自动改用 jsDelivr；只有两个 HTTPS 下载源都失败时才停止安装。仍可在 Mac 克隆仓库后用 scp 上传对应脚本执行。
 
 ### MIPS/MT7621 离线 Xray
 
@@ -99,10 +116,27 @@ sh router/fetch-offline-xray-mips-softfloat-mac.sh
 
 ## 4. 安装或升级 VPS 节点
 
-支持 Debian / Ubuntu + systemd。在 VPS SSH 终端执行：
+支持 Debian / Ubuntu + systemd。在 VPS SSH 终端执行；同样采用 GitHub Raw → jsDelivr 双源回退：
 
 ```bash
-curl -fL --retry 2 --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/sajik1/node-suite/main/vps/install-vless-reality-vps.sh -o /root/install-vless-reality-vps.sh && bash /root/install-vless-reality-vps.sh
+(
+OUT=/root/install-vless-reality-vps.sh
+RAW=https://raw.githubusercontent.com/sajik1/node-suite/main/vps/install-vless-reality-vps.sh
+CDN=https://cdn.jsdelivr.net/gh/sajik1/node-suite@main/vps/install-vless-reality-vps.sh
+rm -f "$OUT"
+if curl -fL --retry 2 --connect-timeout 10 --max-time 120 "$RAW" -o "$OUT"; then
+    echo '安装器下载源：GitHub Raw'
+else
+    echo 'GitHub Raw 下载失败，自动切换 jsDelivr...'
+    curl -fL --retry 2 --connect-timeout 10 --max-time 120 "$CDN" -o "$OUT" || {
+        rm -f "$OUT"
+        echo '错误：GitHub Raw 与 jsDelivr 均下载失败，本次安装停止。' >&2
+        exit 1
+    }
+    echo '安装器下载源：jsDelivr'
+fi
+bash "$OUT"
+)
 ```
 
 VPS 同样只在安装全部完成后删除本次安装脚本，失败/预检保留。
